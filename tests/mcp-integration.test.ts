@@ -19,6 +19,8 @@ const approverToken = '6'.repeat(64);
 const upstreamBearerToken = 'controlled-mcp-upstream-token';
 process.env.NODE_ENV = 'test';
 process.env.SENTINEL_DB_FILE = path.join(temporaryDirectory, 'sentinel-db.json');
+process.env.SENTINEL_STORAGE_DRIVER = 'json-fixture';
+process.env.SENTINEL_TEST_SEED_DEMO = 'true';
 process.env.SENTINEL_APPROVAL_ENCRYPTION_KEY = '7'.repeat(64);
 process.env.SENTINEL_API_TOKENS = JSON.stringify([
   { token: adminToken, subject: 'proxy-admin', role: 'Administrator' },
@@ -135,6 +137,11 @@ test('real Streamable HTTP MCP discovery and tool calls are mediated by gateway 
   assert.equal(registeredResponse.status, 201);
   const registered = await registeredResponse.json() as { id: string; trustStatus: string };
   assert.equal(registered.trustStatus, 'untrusted');
+  const registrationEvent = storage.getEvents().find(event =>
+    event.requestId === `server-register:${registered.id}`
+  );
+  assert.equal(registrationEvent?.eventType, 'ADMIN_ACTION');
+  assert.equal(registrationEvent?.actorId, 'proxy-admin');
   process.env.SENTINEL_MCP_SERVER_TOKENS = JSON.stringify({
     [registered.id]: upstreamBearerToken
   });
@@ -158,6 +165,11 @@ test('real Streamable HTTP MCP discovery and tool calls are mediated by gateway 
 
   const trustResponse = await post(`/servers/${registered.id}/toggle-trust`, adminToken, {});
   assert.equal(trustResponse.status, 200);
+  const trustEvent = storage.getEvents().find(event =>
+    event.requestId.startsWith(`server-trust:${registered.id}:`)
+  );
+  assert.equal(trustEvent?.eventType, 'ADMIN_ACTION');
+  assert.equal(trustEvent?.actorId, 'proxy-admin');
   const unapprovedCall = await post('/gateway/evaluate', adminToken, {
     serverId: registered.id,
     toolName: 'echo_text',

@@ -20,7 +20,7 @@ export class SecurityTestRunner {
       throw new Error(`Scenario not found: ${scenarioIdOrTestId}`);
     }
 
-    const testRunId = `tr-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`;
+    const testRunId = `tr-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
     const checkpoints: SecurityTestRun['verificationEvidence'] = [];
     let failureReason: string | undefined;
 
@@ -139,7 +139,7 @@ export class SecurityTestRunner {
 
     const durationMs = Date.now() - startTime;
     const testRun: SecurityTestRun = {
-      id: `run-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+      id: `run-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
       testRunId,
       scenarioId: scenario.id,
       testId: scenario.testId,
@@ -159,7 +159,7 @@ export class SecurityTestRunner {
       completedAt: new Date().toISOString()
     };
 
-    storage.addTestRun(testRun);
+    await storage.addTestRun(testRun);
     return testRun;
   }
 

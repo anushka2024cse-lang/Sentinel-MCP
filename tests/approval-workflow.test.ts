@@ -15,6 +15,8 @@ const analystToken = '4'.repeat(64);
 
 process.env.NODE_ENV = 'test';
 process.env.SENTINEL_DB_FILE = databaseFile;
+process.env.SENTINEL_STORAGE_DRIVER = 'json-fixture';
+process.env.SENTINEL_TEST_SEED_DEMO = 'true';
 process.env.SENTINEL_APPROVAL_ENCRYPTION_KEY = '3'.repeat(64);
 process.env.SENTINEL_API_TOKENS = JSON.stringify([
   { token: adminToken, subject: 'admin-requester', role: 'Administrator' },
@@ -52,6 +54,43 @@ test('approval is bound, revalidated, atomically claimed and executes the origin
     },
     body: JSON.stringify(body)
   });
+  const settingsResponse = await fetch(`${baseUrl}/settings`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  assert.equal(settingsResponse.status, 200);
+  assert.equal((await settingsResponse.json() as { defaultDeny: boolean }).defaultDeny, true);
+  const savedSettings = await fetch(`${baseUrl}/settings`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ maxPayloadMb: 4, anomalyThreshold: 5 })
+  });
+  assert.equal(savedSettings.status, 200);
+  assert.deepEqual(await savedSettings.json(), {
+    defaultDeny: true,
+    maxPayloadMb: 4,
+    anomalyThreshold: 5
+  });
+  const approverCannotChangeSettings = await fetch(`${baseUrl}/settings`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${approverToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ maxPayloadMb: 3 })
+  });
+  assert.equal(approverCannotChangeSettings.status, 403);
+  const invalidSettings = await fetch(`${baseUrl}/settings`, {
+    method: 'PATCH',
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ maxPayloadMb: 500 })
+  });
+  assert.equal(invalidSettings.status, 400);
   const createRequest = () => post('/gateway/evaluate', adminToken, {
     actorId: 'spoofed-approver',
     actorRole: 'Approver',
@@ -164,7 +203,7 @@ test('approval is bound, revalidated, atomically claimed and executes the origin
   const policy = storage.getPolicies().find(item => item.id === policyId);
   assert.ok(policy);
   await new Promise(resolve => setTimeout(resolve, 2));
-  storage.updatePolicy(policy.id, { description: `${policy.description} Updated after request.` });
+  await storage.updatePolicy(policy.id, { description: `${policy.description} Updated after request.` });
   const stalePolicyDecision = await post(`/approvals/${stalePolicyBody.approvalRequestId}/decide`, approverToken, {
     decision: 'APPROVED'
   });
@@ -175,7 +214,7 @@ test('approval is bound, revalidated, atomically claimed and executes the origin
   const expiredBody = await expiredEvaluation.json() as { approvalRequestId: string };
   const storedApproval = storage.getApprovalById(expiredBody.approvalRequestId);
   assert.ok(storedApproval);
-  storage.updateApproval(storedApproval.id, { expiresAt: new Date(Date.now() - 1000).toISOString() });
+  await storage.updateApproval(storedApproval.id, { expiresAt: new Date(Date.now() - 1000).toISOString() });
   const expiredDecision = await post(`/approvals/${expiredBody.approvalRequestId}/decide`, approverToken, {
     decision: 'APPROVED'
   });
@@ -188,7 +227,7 @@ test('approval is bound, revalidated, atomically claimed and executes the origin
   const tamperedApproval = storage.getApprovalById(tamperedBody.approvalRequestId);
   assert.ok(tamperedApproval?.encryptedArguments);
   const ciphertext = tamperedApproval.encryptedArguments.ciphertext;
-  storage.updateApproval(tamperedApproval.id, {
+  await storage.updateApproval(tamperedApproval.id, {
     encryptedArguments: {
       ...tamperedApproval.encryptedArguments,
       ciphertext: `${ciphertext[0] === 'A' ? 'B' : 'A'}${ciphertext.slice(1)}`
@@ -202,19 +241,19 @@ test('approval is bound, revalidated, atomically claimed and executes the origin
 
   const trustEvaluation = await createRequest();
   const trustBody = await trustEvaluation.json() as { approvalRequestId: string };
-  storage.updateServer('srv-finance-vault', { trustStatus: 'quarantined' });
+  await storage.updateServer('srv-finance-vault', { trustStatus: 'quarantined' });
   const trustDecision = await post(`/approvals/${trustBody.approvalRequestId}/decide`, approverToken, {
     decision: 'APPROVED'
   });
   assert.equal(trustDecision.status, 409);
   assert.equal(transferCount(), initialTransfers + 2);
 
-  storage.updateServer('srv-finance-vault', { trustStatus: 'trusted', approvalStatus: 'approved' });
+  await storage.updateServer('srv-finance-vault', { trustStatus: 'trusted', approvalStatus: 'approved' });
   const staleToolEvaluation = await createRequest();
   const staleToolBody = await staleToolEvaluation.json() as { approvalRequestId: string };
   const staleToolApproval = storage.getApprovalById(staleToolBody.approvalRequestId);
   assert.ok(staleToolApproval?.toolId);
-  storage.updateTool(staleToolApproval.toolId, { description: 'Tool definition changed after approval.' });
+  await storage.updateTool(staleToolApproval.toolId, { description: 'Tool definition changed after approval.' });
   const staleToolDecision = await post(`/approvals/${staleToolBody.approvalRequestId}/decide`, approverToken, {
     decision: 'APPROVED'
   });
@@ -336,4 +375,39 @@ test('approval is bound, revalidated, atomically claimed and executes the origin
   const recoveredExecution = await afterExplicitRecovery.json() as { decision: string; toolExecuted: boolean };
   assert.equal(recoveredExecution.decision, 'ALLOW');
   assert.equal(recoveredExecution.toolExecuted, true);
+
+  const policyCreateResponse = await post('/policies', adminToken, {
+    name: 'Audit transition test policy',
+    allowedRoles: ['Administrator']
+  });
+  assert.equal(policyCreateResponse.status, 201);
+  const createdPolicy = await policyCreateResponse.json() as { id: string };
+  const policyCreateEvent = storage.getEvents().find(event =>
+    event.requestId === `policy-create:${createdPolicy.id}`
+  );
+  assert.equal(policyCreateEvent?.eventType, 'ADMIN_ACTION');
+  assert.equal(policyCreateEvent?.actorId, 'admin-requester');
+
+  const policyUpdateResponse = await fetch(`${baseUrl}/policies/${createdPolicy.id}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: 'Bearer ' + adminToken,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ description: 'Updated through the admin audit test.' })
+  });
+  assert.equal(policyUpdateResponse.status, 200);
+  const policyUpdateEvent = storage.getEvents().find(event =>
+    event.requestId.startsWith(`policy-update:${createdPolicy.id}:`)
+  );
+  assert.equal(policyUpdateEvent?.eventType, 'ADMIN_ACTION');
+  assert.equal(policyUpdateEvent?.actorId, 'admin-requester');
+
+  const policyToggleResponse = await post(`/policies/${createdPolicy.id}/toggle`, adminToken, {});
+  assert.equal(policyToggleResponse.status, 200);
+  const policyToggleEvent = storage.getEvents().find(event =>
+    event.requestId.startsWith(`policy-toggle:${createdPolicy.id}:`)
+  );
+  assert.equal(policyToggleEvent?.eventType, 'ADMIN_ACTION');
+  assert.equal(policyToggleEvent?.actorId, 'admin-requester');
 });

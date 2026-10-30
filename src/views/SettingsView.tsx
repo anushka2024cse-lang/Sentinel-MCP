@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Settings,
   Sliders,
@@ -7,7 +7,8 @@ import {
   CheckCircle2,
   RotateCcw
 } from 'lucide-react';
-import { UserRole } from '../types/index.js';
+import { GatewaySettings, UserRole } from '../types/index.js';
+import { api } from '../services/api.js';
 
 interface SettingsViewProps {
   currentRole: UserRole;
@@ -24,13 +25,46 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [maxPayloadMb, setMaxPayloadMb] = useState<number>(10);
   const [anomalyThreshold, setAnomalyThreshold] = useState<number>(3);
   const [savedNotice, setSavedNotice] = useState<boolean>(false);
+  const [isLoadingSettings, setIsLoadingSettings] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState<string>();
 
   const isAdmin = currentRole === 'Administrator';
 
-  const handleSave = (e: React.FormEvent) => {
+  useEffect(() => {
+    let active = true;
+    api.getSettings().then(settings => {
+      if (!active) return;
+      setDefaultDeny(settings.defaultDeny);
+      setMaxPayloadMb(settings.maxPayloadMb);
+      setAnomalyThreshold(settings.anomalyThreshold);
+      setIsLoadingSettings(false);
+    }).catch(error => {
+      if (!active) return;
+      setSettingsError(error instanceof Error ? error.message : 'Settings could not be loaded.');
+      setIsLoadingSettings(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSavedNotice(true);
-    setTimeout(() => setSavedNotice(false), 2500);
+    setSettingsError(undefined);
+    setIsSaving(true);
+    try {
+      const settings: GatewaySettings = await api.updateSettings({ maxPayloadMb, anomalyThreshold });
+      setDefaultDeny(settings.defaultDeny);
+      setMaxPayloadMb(settings.maxPayloadMb);
+      setAnomalyThreshold(settings.anomalyThreshold);
+      setSavedNotice(true);
+      setTimeout(() => setSavedNotice(false), 2500);
+    } catch (error) {
+      setSettingsError(error instanceof Error ? error.message : 'Settings could not be saved.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -63,26 +97,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="flex items-center justify-between p-3 rounded-lg bg-black/40 border border-slate-800">
               <div>
                 <span className="font-bold text-slate-200">Default-Deny Access Policy</span>
-                <p className="text-slate-400 text-[11px]">Reject all requests when server, tool, or role permissions are unverified.</p>
+                <p className="text-slate-400 text-[11px]">A fixed security invariant: unverified servers, tools, and roles are rejected.</p>
               </div>
               <input
                 type="checkbox"
                 checked={defaultDeny}
                 onChange={(e) => setDefaultDeny(e.target.checked)}
-                disabled={!isAdmin}
+                disabled
                 className="w-4 h-4 rounded bg-slate-800 border-slate-700 text-blue-600 focus:ring-0 cursor-pointer"
               />
             </div>
 
             <div>
-              <label className="block text-slate-300 font-medium mb-1">Max Inbound Payload Size (MB)</label>
+              <label className="block text-slate-300 font-medium mb-1">Max JSON Request Payload Size (MB)</label>
               <input
                 type="number"
                 min={1}
                 max={50}
                 value={maxPayloadMb}
                 onChange={(e) => setMaxPayloadMb(Number(e.target.value))}
-                disabled={!isAdmin}
+                disabled={!isAdmin || isLoadingSettings || isSaving}
                 className="w-full bg-[#111C30] border border-slate-700 rounded-lg p-2 text-slate-200 font-mono focus:outline-none focus:border-blue-500"
               />
             </div>
@@ -97,7 +131,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 max={20}
                 value={anomalyThreshold}
                 onChange={(e) => setAnomalyThreshold(Number(e.target.value))}
-                disabled={!isAdmin}
+                disabled={!isAdmin || isLoadingSettings || isSaving}
                 className="w-full bg-[#111C30] border border-slate-700 rounded-lg p-2 text-slate-200 font-mono focus:outline-none focus:border-blue-500"
               />
             </div>
@@ -106,15 +140,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               <div className="pt-2 flex items-center justify-between">
                 <button
                   type="submit"
+                  disabled={isLoadingSettings || isSaving}
                   className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold cursor-pointer shadow-md shadow-blue-900/30"
                 >
-                  Save Gateway Parameters
+                  {isSaving ? 'Saving...' : 'Save Gateway Parameters'}
                 </button>
                 {savedNotice && (
                   <span className="text-emerald-400 font-mono text-[11px] flex items-center gap-1">
                     <CheckCircle2 className="w-3.5 h-3.5" /> Parameters updated!
                   </span>
                 )}
+                {isLoadingSettings && <p className="text-slate-400">Loading persisted settings…</p>}
+                {settingsError && <p role="alert" className="text-red-400">{settingsError}</p>}
               </div>
             )}
           </div>

@@ -6,10 +6,26 @@ Sentinel-MCP is a React dashboard and Express-based security gateway prototype f
 
 **Prerequisite:** Node.js 20.19+ or 22.12+.
 
+Runtime storage requires MongoDB. Configure `MONGODB_URI` and `MONGODB_DB_NAME` in a local `.env` file or your process environment. The URI is only read by the backend and must not be added to any `VITE_` variable. Use a replica set (including a single-node development replica set) or a sharded cluster: approval and incident state changes that span multiple documents are committed in MongoDB transactions.
+
 ```powershell
 npm ci
+$env:MONGODB_URI = "mongodb://127.0.0.1:27017/?replicaSet=rs0"
+$env:MONGODB_DB_NAME = "sentinel_mcp"
 npm run dev
 ```
+
+For an existing JSON installation, first validate the migration without writing, then import it:
+
+```powershell
+npm run db:migrate -- --dry-run
+npm run db:migrate
+npm run dev
+```
+
+The migration reads `data/sentinel-db.json` without changing or deleting it. Override its location with `--file=<path>`. It validates collection shape, IDs, uniqueness, and server references, uses insert-only upserts, and reports imported, skipped, and failed document counts. Rerunning it will not overwrite MongoDB records. If the file is absent, skip migration; startup initializes an empty MongoDB database and does not seed demo data automatically.
+
+The current `data/sentinel-db.json` contains duplicate request document IDs, so migration validation rejects it before connecting to MongoDB. Resolve the duplicate IDs in a reviewed copy and pass that copy with `--file=<path>`; the migration intentionally does not rewrite the source.
 
 In development, the server binds to `127.0.0.1` and creates separate temporary Administrator and Approver API tokens for that process. Copy the desired token printed in the VS Code terminal into the sign-in page. Tokens are not saved and become invalid when the server restarts.
 
@@ -42,7 +58,11 @@ Deployment topology: callers authenticate to Sentinel's API; only the Sentinel b
 
 Incident investigations expose correlated request, tool, policy, and audit evidence while keeping stored request arguments and outputs out of the incident detail response. Admin-only containment quarantines the affected server and is checked by the gateway independently of the server trust flag. Resolution preserves the containment lock; an administrator must explicitly release it, and server trust must also be re-established before calls are accepted.
 
-The JSON database defaults to `data/sentinel-db.json`; set `SENTINEL_DB_FILE` to select another path. Writes use atomic file replacement and approval transitions roll back in-memory state when persistence fails. This is still single-process JSON persistence, not a multi-process database or a general transaction system.
+MongoDB is the runtime system of record. The backend reuses one MongoDB client, initializes indexes at startup, and fails closed if the database is unavailable or configuration is missing. Related multi-document writes require transaction support; MongoDB standalone deployments will return an explicit transaction-support error when such a write is attempted. API bearer tokens, upstream MCP credentials, and approval encryption keys remain server-side configuration and are not persisted to MongoDB. Identity bearer-token material and full request arguments/output payloads are excluded from MongoDB documents.
+
+The Settings page persists the maximum JSON payload size and denied-request anomaly threshold. The default-deny setting is a non-configurable security invariant and cannot be disabled. Runtime payload-size enforcement reads the persisted setting for each request; anomaly detection uses its saved threshold.
+
+The old JSON format is retained only as an explicit migration source and isolated test fixture. Do not configure it as the runtime database. Run one gateway process per database for now: storage reads are loaded into a process-local cache at startup, so cross-process cache invalidation is not implemented.
 
 ## Checks
 
@@ -58,5 +78,5 @@ npm run build
 - The identity and MCP server records currently stored in `data/sentinel-db.json` include prototype/demo data. Configured API identities, not those records or client-supplied role fields, determine API access.
 - Real Streamable HTTP MCP calls are supported through the gateway; stdio, legacy SSE, and WebSocket transports remain simulated/unsupported.
 - Incident notes, lifecycle transitions, server quarantine, and explicit containment recovery are persisted with audit events, but do not yet have durable database transactions across multiple processes.
-- JSON persistence does not provide multi-process locking or full transactional guarantees across all storage mutations.
+- MongoDB transaction support depends on a replica set or sharded cluster. Cross-process cache invalidation and multi-instance operation are not implemented.
 - Development uses a process-local fallback approval-encryption key; pending encrypted approvals cannot be resumed after a server restart unless a stable key is configured.

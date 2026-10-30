@@ -134,8 +134,8 @@ export class SecurityGatewayEngine {
     // Step 0: Check for Direct Gateway Bypass attempt
     if (input.bypassGateway) {
       const event: SecurityEvent = {
-        id: `evt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-        eventId: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+        id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
+        eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
         requestId,
         eventType: 'DIRECT_BYPASS_ATTEMPT',
         severity: 'Critical',
@@ -146,10 +146,8 @@ export class SecurityGatewayEngine {
         evidenceSummary: 'Direct route access attempt detected circumventing Sentinel gateway mediation. Call rejected.',
         createdAt: now.toISOString()
       };
-      storage.addEvent(event);
-
       const secReq: SecurityRequest = {
-        id: `sec-${Date.now()}`,
+        id: `sec-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
         requestId,
         actorId: actor?.id || 'unknown_intruder',
         actorRole: actor?.role || 'Read-only Auditor',
@@ -165,7 +163,7 @@ export class SecurityGatewayEngine {
         isTestRun: input.isTestRun,
         createdAt: now.toISOString()
       };
-      storage.addRequest(secReq);
+      await storage.recordGatewayOutcome(secReq, event);
 
       return {
         decision: 'DENY',
@@ -189,8 +187,8 @@ export class SecurityGatewayEngine {
       riskScore += 80;
 
       const event: SecurityEvent = {
-        id: `evt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-        eventId: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+        id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
+        eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
         requestId,
         eventType: 'UNAUTHENTICATED_ACCESS',
         severity: 'High',
@@ -201,10 +199,8 @@ export class SecurityGatewayEngine {
         evidenceSummary: 'Request failed authentication check; zero client credentials established.',
         createdAt: now.toISOString()
       };
-      storage.addEvent(event);
-
       const secReq: SecurityRequest = {
-        id: `sec-${Date.now()}`,
+        id: `sec-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
         requestId,
         actorId: 'UNAUTHENTICATED',
         actorRole: 'Read-only Auditor',
@@ -220,7 +216,7 @@ export class SecurityGatewayEngine {
         isTestRun: input.isTestRun,
         createdAt: now.toISOString()
       };
-      storage.addRequest(secReq);
+      await storage.recordGatewayOutcome(secReq, event);
 
       return {
         decision: 'DENY',
@@ -356,8 +352,8 @@ export class SecurityGatewayEngine {
       matchedPolicyIds.push('pol-005');
 
       const event: SecurityEvent = {
-        id: `evt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-        eventId: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+        id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
+        eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
         requestId,
         eventType: 'TOOL_DEFINITION_CHANGED',
         severity: 'Critical',
@@ -369,11 +365,9 @@ export class SecurityGatewayEngine {
         evidenceSummary: `Tool fingerprint altered from baseline '${baselineHash}' to '${currentFingerprint}'. Execution halted pending security review.`,
         createdAt: now.toISOString()
       };
-      storage.addEvent(event);
-
       // Create an automatic security incident for tampering
-      storage.addIncident({
-        id: `inc-${Date.now()}`,
+      const incident: SecurityIncident = {
+        id: `inc-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
         title: `Tool Definition Tampering Detected: ${tool.name}`,
         severity: 'Critical',
         status: 'Open',
@@ -385,10 +379,10 @@ export class SecurityGatewayEngine {
         investigationNotes: [],
         createdAt: now.toISOString(),
         updatedAt: now.toISOString()
-      });
+      };
 
       const secReq: SecurityRequest = {
-        id: `sec-${Date.now()}`,
+        id: `sec-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
         requestId,
         actorId: actor?.id || 'unknown',
         actorRole: resolvedRole,
@@ -404,7 +398,7 @@ export class SecurityGatewayEngine {
         isTestRun: input.isTestRun,
         createdAt: now.toISOString()
       };
-      storage.addRequest(secReq);
+      await storage.recordGatewayOutcome(secReq, event, [], incident);
 
       return {
         decision: 'DENY',
@@ -430,8 +424,8 @@ export class SecurityGatewayEngine {
       riskScore += 40;
 
       const event: SecurityEvent = {
-        id: `evt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-        eventId: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+        id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
+        eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
         requestId,
         eventType: 'SCHEMA_VIOLATION',
         severity: 'Medium',
@@ -442,10 +436,8 @@ export class SecurityGatewayEngine {
         evidenceSummary: `Input arguments failed schema validation: ${schemaValidation.error}`,
         createdAt: now.toISOString()
       };
-      storage.addEvent(event);
-
       const secReq: SecurityRequest = {
-        id: `sec-${Date.now()}`,
+        id: `sec-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
         requestId,
         actorId: actor?.id || 'unknown',
         actorRole: resolvedRole,
@@ -461,7 +453,7 @@ export class SecurityGatewayEngine {
         isTestRun: input.isTestRun,
         createdAt: now.toISOString()
       };
-      storage.addRequest(secReq);
+      await storage.recordGatewayOutcome(secReq, event);
 
       return {
         decision: 'DENY',
@@ -507,8 +499,8 @@ export class SecurityGatewayEngine {
       riskScore += 35;
 
       const event: SecurityEvent = {
-        id: `evt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-        eventId: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+        id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
+        eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
         requestId,
         eventType: 'PROMPT_INJECTION_DETECTED',
         severity: 'High',
@@ -519,7 +511,7 @@ export class SecurityGatewayEngine {
         evidenceSummary: `Heuristic scan identified suspicious prompt-override pattern: "${injectionCheck.matchedSnippet}". Gateway maintains independent policy boundary.`,
         createdAt: now.toISOString()
       };
-      storage.addEvent(event);
+      await storage.addEvent(event);
     }
 
     // Step 6: Central Policy Engine Deterministic Evaluation
@@ -539,7 +531,7 @@ export class SecurityGatewayEngine {
       // Record denied attempt for anomaly tracker
       this.recordDeniedAttempt(actor?.id || 'unknown');
 
-      const anomalyTriggered = this.checkAnomalyThreshold(actor?.id || 'unknown');
+      const anomalyTriggered = await this.checkAnomalyThreshold(actor?.id || 'unknown');
       if (anomalyTriggered) {
         riskFactors.push('ALERT: Rapid repeated unauthorized access attempts triggered rate limit/anomaly rule.');
       }
@@ -597,8 +589,8 @@ export class SecurityGatewayEngine {
             matchedPolicyIds.push(policy.id);
 
             const event: SecurityEvent = {
-              id: `evt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-              eventId: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+              id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
+              eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
               requestId,
               eventType: 'DATA_LEAK_PREVENTED',
               severity: 'Critical',
@@ -610,10 +602,8 @@ export class SecurityGatewayEngine {
               evidenceSummary: `Confidential export blocked: destination '${dest || 'EMPTY'}' was not recognized in approved compliance endpoints. Zero bytes exfiltrated.`,
               createdAt: now.toISOString()
             };
-            storage.addEvent(event);
-
             const secReq: SecurityRequest = {
-              id: `sec-${Date.now()}`,
+              id: `sec-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
               requestId,
               actorId: actor?.id || 'unknown',
               actorRole: resolvedRole,
@@ -630,7 +620,7 @@ export class SecurityGatewayEngine {
               isTestRun: input.isTestRun,
               createdAt: now.toISOString()
             };
-            storage.addRequest(secReq);
+            await storage.recordGatewayOutcome(secReq, event);
 
             return {
               decision: 'DENY',
@@ -707,8 +697,8 @@ export class SecurityGatewayEngine {
         };
 
         const event: SecurityEvent = {
-          id: `evt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-          eventId: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+          id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
+          eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
           requestId,
           eventType: 'APPROVAL_DISPATCHED',
           severity: 'High',
@@ -721,7 +711,7 @@ export class SecurityGatewayEngine {
           createdAt: now.toISOString()
         };
         const secReq: SecurityRequest = {
-          id: `sec-${Date.now()}`,
+          id: `sec-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
           requestId,
           actorId: actor.id,
           actorRole: resolvedRole,
@@ -737,7 +727,7 @@ export class SecurityGatewayEngine {
           isTestRun: input.isTestRun,
           createdAt: now.toISOString()
         };
-        storage.createPendingApproval(approvalReq, secReq, event);
+        await storage.createPendingApproval(approvalReq, secReq, event);
 
         return {
           decision: 'REQUIRE_APPROVAL',
@@ -773,7 +763,7 @@ export class SecurityGatewayEngine {
       riskFactors.push(outcome);
       const failedAt = new Date().toISOString();
       const event: SecurityEvent = {
-        id: `evt-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+        id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
         eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
         requestId,
         eventType: 'REQUEST_EVALUATED',
@@ -785,9 +775,8 @@ export class SecurityGatewayEngine {
         evidenceSummary: outcome,
         createdAt: failedAt
       };
-      storage.addEvent(event);
-      storage.addRequest({
-        id: `sec-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+      await storage.recordGatewayOutcome({
+        id: `sec-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
         requestId,
         actorId: actor.id,
         actorRole: resolvedRole,
@@ -803,7 +792,7 @@ export class SecurityGatewayEngine {
         executionStatus: executionUncertain ? 'uncertain' : 'failed',
         isTestRun: input.isTestRun,
         createdAt: failedAt
-      });
+      }, event);
       return {
         decision: 'DENY',
         executionStatus: executionUncertain ? 'uncertain' : 'failed',
@@ -828,16 +817,13 @@ export class SecurityGatewayEngine {
     const finalExecutionStatus: ExecutionStatus = outputInspection.wasRedacted ? 'sanitized' : 'executed';
 
     if (outputInspection.findings.length > 0) {
-      outputInspection.findings.forEach(f => {
-        sensitiveFindings.push(f);
-        storage.addFinding(f);
-      });
+      sensitiveFindings.push(...outputInspection.findings);
       matchedPolicyIds.push('pol-006');
     }
 
     const event: SecurityEvent = {
-      id: `evt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-      eventId: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+      id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
+      eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
       requestId,
       eventType: 'REQUEST_EVALUATED',
       severity: outputInspection.wasRedacted ? 'High' : (riskScore > 50 ? 'Medium' : 'Low'),
@@ -850,10 +836,8 @@ export class SecurityGatewayEngine {
         : `Tool execution permitted and validated under policies [${matchedPolicyIds.join(', ') || 'default'}].`,
       createdAt: now.toISOString()
     };
-    storage.addEvent(event);
-
     const secReq: SecurityRequest = {
-      id: `sec-${Date.now()}`,
+      id: `sec-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
       requestId,
       actorId: actor?.id || 'unknown',
       actorRole: resolvedRole,
@@ -870,7 +854,7 @@ export class SecurityGatewayEngine {
       isTestRun: input.isTestRun,
       createdAt: now.toISOString()
     };
-    storage.addRequest(secReq);
+    await storage.recordGatewayOutcome(secReq, event, outputInspection.findings);
 
     return {
       decision: finalDecision,
@@ -916,8 +900,8 @@ export class SecurityGatewayEngine {
       createdAt: now.toISOString()
     });
 
-    const expire = () => {
-      const expired = storage.transitionApproval(
+    const expire = async () => {
+      const expired = await storage.transitionApproval(
         approval.id,
         'PENDING',
         {
@@ -936,7 +920,7 @@ export class SecurityGatewayEngine {
       throw new ApprovalWorkflowError(409, 'Approval has expired and cannot be executed.');
     };
 
-    if (Date.parse(approval.expiresAt) <= now.getTime()) expire();
+    if (Date.parse(approval.expiresAt) <= now.getTime()) await expire();
     if (reviewer.subject === approval.requesterId) {
       throw new ApprovalWorkflowError(403, 'A requester cannot approve their own operation.');
     }
@@ -1063,7 +1047,7 @@ export class SecurityGatewayEngine {
     }
 
     const claimTime = new Date().toISOString();
-    const claimed = storage.transitionApproval(
+    const claimed = await storage.transitionApproval(
       approval.id,
       'PENDING',
       {
@@ -1082,7 +1066,6 @@ export class SecurityGatewayEngine {
     try {
       const rawResult = await this.executeToolAdapter(server, tool, args);
       const inspected = this.inspectAndSanitizeOutput(rawResult.data, approval.requestId);
-      for (const finding of inspected.findings) storage.addFinding(finding);
 
       const status = inspected.wasRedacted ? 'sanitized' : 'executed';
       const decision = inspected.wasRedacted ? 'SANITIZE_AND_ALLOW' : 'ALLOW';
@@ -1093,7 +1076,7 @@ export class SecurityGatewayEngine {
         ? inspected.sanitized
         : JSON.stringify(inspected.sanitized);
       const completedAt = new Date().toISOString();
-      const completed = storage.transitionApproval(
+      const completed = await storage.transitionApproval(
         approval.id,
         'APPROVED',
         {
@@ -1108,13 +1091,14 @@ export class SecurityGatewayEngine {
           outputSummary: serializedOutput.slice(0, 150),
           remediationReason: undefined,
           createdAt: completedAt
-        }
+        },
+        inspected.findings
       );
       if (!completed) throw new Error('Approval execution claim was lost before recording its outcome.');
       return completed;
     } catch {
       const uncertainOutcome = 'Execution outcome is uncertain; the operation will not be retried automatically.';
-      storage.transitionApproval(
+      await storage.transitionApproval(
         approval.id,
         'APPROVED',
         {
@@ -1131,11 +1115,11 @@ export class SecurityGatewayEngine {
     }
   }
 
-  public static denyApproval(
+  public static async denyApproval(
     approvalId: string,
     reviewer: { subject: string; role: UserRole },
     reason?: string
-  ): ApprovalRequest {
+  ): Promise<ApprovalRequest> {
     const approval = storage.getApprovalById(approvalId);
     if (!approval) throw new ApprovalWorkflowError(404, 'Approval request not found.');
     if (approval.status !== 'PENDING') {
@@ -1149,7 +1133,7 @@ export class SecurityGatewayEngine {
     }
 
     const now = new Date().toISOString();
-    const denied = storage.transitionApproval(
+    const denied = await storage.transitionApproval(
       approvalId,
       'PENDING',
       {
@@ -1161,7 +1145,7 @@ export class SecurityGatewayEngine {
         executionOutcome: 'Operation rejected; the tool was not executed.'
       },
       {
-        id: `evt-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+        id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
         eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
         requestId: approval.requestId,
         eventType: 'REQUEST_EVALUATED',
@@ -1227,7 +1211,7 @@ export class SecurityGatewayEngine {
         const adj = Number(args.adjustment || 0);
         const item = syn.inventory.find(i => i.sku === sku);
         if (item) {
-          storage.mutateInventory(sku, adj);
+          await storage.mutateInventory(sku, adj);
           return {
             data: { sku, previousQuantity: item.quantity - adj, currentQuantity: item.quantity, status: 'SUCCESS' },
             evidence: `Inventory for ${sku} adjusted by ${adj}. Current stock: ${item.quantity}.`
@@ -1257,7 +1241,7 @@ export class SecurityGatewayEngine {
         const quarter = String(args.quarter || 'Q3-2026');
         const dest = String(args.destination || 'https://compliance-vault.internal.corp');
         const report = syn.financialReports.find(f => f.quarter === quarter) || syn.financialReports[0];
-        storage.recordExternalTransfer(dest, `Exported financial ledger for ${quarter}`);
+        await storage.recordExternalTransfer(dest, `Exported financial ledger for ${quarter}`);
         return {
           data: {
             quarter: report.quarter,
@@ -1396,16 +1380,15 @@ export class SecurityGatewayEngine {
   private static recordDeniedAttempt(actorId: string): void {
     const now = Date.now();
     this.recentDeniedAttempts.push({ actorId, timestamp: now });
-    // Keep only last 2 minutes
-    this.recentDeniedAttempts = this.recentDeniedAttempts.filter(a => now - a.timestamp < 120000);
+    this.recentDeniedAttempts = this.recentDeniedAttempts.filter(a => now - a.timestamp < 60000);
   }
 
-  private static checkAnomalyThreshold(actorId: string): boolean {
+  private static async checkAnomalyThreshold(actorId: string): Promise<boolean> {
     const recentFromActor = this.recentDeniedAttempts.filter(a => a.actorId === actorId);
-    if (recentFromActor.length >= 3) {
+    if (recentFromActor.length >= storage.getSettings().anomalyThreshold) {
       // Trigger security incident
-      storage.addIncident({
-        id: `inc-${Date.now()}`,
+      await storage.addIncident({
+        id: `inc-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
         title: `Repeated Unauthorized Access Anomaly (${actorId})`,
         severity: 'High',
         status: 'Open',
@@ -1423,7 +1406,7 @@ export class SecurityGatewayEngine {
     return false;
   }
 
-  private static rejectWithEvent(params: {
+  private static async rejectWithEvent(params: {
     requestId: string;
     actorId: string;
     actorRole: UserRole;
@@ -1436,12 +1419,12 @@ export class SecurityGatewayEngine {
     reason: string;
     eventType: SecurityEvent['eventType'];
     isTestRun?: boolean;
-  }): EvaluationResult {
+  }): Promise<EvaluationResult> {
     const now = new Date().toISOString();
 
     const event: SecurityEvent = {
-      id: `evt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
-      eventId: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
+      id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
+      eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
       requestId: params.requestId,
       eventType: params.eventType,
       severity: params.riskScore >= 80 ? 'Critical' : (params.riskScore >= 60 ? 'High' : 'Medium'),
@@ -1453,10 +1436,8 @@ export class SecurityGatewayEngine {
       evidenceSummary: params.reason,
       createdAt: now
     };
-    storage.addEvent(event);
-
     const secReq: SecurityRequest = {
-      id: `sec-${Date.now()}`,
+      id: `sec-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
       requestId: params.requestId,
       actorId: params.actorId,
       actorRole: params.actorRole,
@@ -1472,7 +1453,7 @@ export class SecurityGatewayEngine {
       isTestRun: params.isTestRun,
       createdAt: now
     };
-    storage.addRequest(secReq);
+    await storage.recordGatewayOutcome(secReq, event);
 
     return {
       decision: 'DENY',

@@ -1,4 +1,4 @@
-import express, { Request, Response, Router } from 'express';
+import express, { Request, Response, Router, RequestHandler } from 'express';
 import crypto from 'crypto';
 import { storage, computeFingerprint } from './storage.js';
 import { ApprovalWorkflowError, SecurityGatewayEngine } from './engine.js';
@@ -11,7 +11,7 @@ import {
   requirePrincipal
 } from './auth.js';
 import { initializeApprovalEncryptionKey } from './approvalCrypto.js';
-import { MCPServer, SecurityEvent, SecurityIncident, SecurityPolicy, UserRole } from '../types/index.js';
+import { GatewaySettings, MCPServer, SecurityEvent, SecurityIncident, SecurityPolicy, UserRole } from '../types/index.js';
 import {
   computeMcpToolFingerprint,
   discoverMcpTools,
@@ -24,9 +24,102 @@ export const apiRouter = Router();
 const apiTokenConfig = loadApiTokenConfig(process.env);
 initializeApprovalEncryptionKey();
 
+function asyncRoute(handler: (req: Request, res: Response) => Promise<unknown>): RequestHandler {
+  return (req, res, next) => {
+    void handler(req, res).catch(error => {
+      console.error('[SENTINEL-MCP] Persistent operation failed:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'The operation could not be durably completed.' });
+      } else {
+        next(error);
+      }
+    });
+  };
+}
+
+function validatePolicyInput(value: unknown): value is Partial<SecurityPolicy> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const input = value as Record<string, unknown>;
+  const allowedFields = new Set([
+    'name', 'description', 'enabled', 'priority', 'applicableServerId', 'applicableToolName',
+    'allowedRoles', 'allowedDestinations', 'disallowedDestinations', 'operationType',
+    'maxRiskScore', 'approvalRequired', 'denyConditions', 'remediationMessage'
+  ]);
+  if (Object.keys(input).some(key => !allowedFields.has(key))) return false;
+  const stringLimits: Record<string, number> = {
+    name: 128,
+    description: 1000,
+    applicableServerId: 128,
+    applicableToolName: 128,
+    remediationMessage: 1000
+  };
+  for (const [field, maximum] of Object.entries(stringLimits)) {
+    if (field in input && (
+      typeof input[field] !== 'string' ||
+      (input[field] as string).length > maximum ||
+      field === 'name' && !(input[field] as string).trim()
+    )) return false;
+  }
+  if ('enabled' in input && typeof input.enabled !== 'boolean') return false;
+  if ('approvalRequired' in input && typeof input.approvalRequired !== 'boolean') return false;
+  if ('priority' in input && (!Number.isInteger(input.priority) || (input.priority as number) < 1 || (input.priority as number) > 100)) return false;
+  if ('maxRiskScore' in input && (
+    typeof input.maxRiskScore !== 'number' || input.maxRiskScore < 0 || input.maxRiskScore > 100
+  )) return false;
+  if ('operationType' in input && !['Read', 'Write', 'Export', 'Destructive', 'Administrative'].includes(String(input.operationType))) return false;
+  if ('allowedRoles' in input && (
+    !Array.isArray(input.allowedRoles) ||
+    input.allowedRoles.some(role => !['Administrator', 'Security Analyst', 'Approver', 'Read-only Auditor'].includes(String(role)))
+  )) return false;
+  for (const field of ['allowedDestinations', 'disallowedDestinations']) {
+    if (field in input && (
+      !Array.isArray(input[field]) ||
+      (input[field] as unknown[]).length > 50 ||
+      (input[field] as unknown[]).some(destination => typeof destination !== 'string' || destination.length > 256)
+    )) return false;
+  }
+  if ('denyConditions' in input) {
+    const conditions = input.denyConditions;
+    if (typeof conditions !== 'object' || conditions === null || Array.isArray(conditions)) return false;
+    const record = conditions as Record<string, unknown>;
+    if (
+      Object.keys(record).some(key => !['field', 'containsSensitive', 'requireKnownDestination', 'disallowReadOnlyWrites'].includes(key)) ||
+      'field' in record && (typeof record.field !== 'string' || record.field.length > 128) ||
+      ['containsSensitive', 'requireKnownDestination', 'disallowReadOnlyWrites'].some(key =>
+        key in record && typeof record[key] !== 'boolean'
+      )
+    ) return false;
+  }
+  return true;
+}
+
 function publicApproval(approval: NonNullable<ReturnType<typeof storage.getApprovalById>>) {
   const { encryptedArguments: _encryptedArguments, ...safeApproval } = approval;
   return safeApproval;
+}
+
+function managementAuditEvent(
+  req: Request,
+  requestId: string,
+  serverId: string,
+  toolName: string,
+  evidenceSummary: string,
+  decision: SecurityEvent['decision'] = 'ALLOW'
+): SecurityEvent {
+  const principal = requirePrincipal(req);
+  return {
+    id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
+    eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
+    requestId,
+    eventType: 'ADMIN_ACTION',
+    severity: decision === 'DENY' ? 'High' : 'Low',
+    actorId: principal.subject,
+    serverId,
+    toolName,
+    decision,
+    evidenceSummary,
+    createdAt: new Date().toISOString()
+  };
 }
 
 apiRouter.use(
@@ -37,6 +130,43 @@ apiRouter.use(
 apiRouter.get('/auth/session', (req: Request, res: Response) => {
   res.json(requirePrincipal(req));
 });
+
+apiRouter.get('/settings', (_req: Request, res: Response) => {
+  res.json(storage.getSettings());
+});
+
+apiRouter.patch('/settings', asyncRoute(async (req: Request, res: Response) => {
+  const allowedFields = new Set(['maxPayloadMb', 'anomalyThreshold']);
+  if (
+    typeof req.body !== 'object' ||
+    req.body === null ||
+    Array.isArray(req.body) ||
+    Object.keys(req.body).some(key => !allowedFields.has(key)) ||
+    Object.keys(req.body).length === 0 ||
+    typeof req.body.maxPayloadMb !== 'undefined' &&
+      (!Number.isInteger(req.body.maxPayloadMb) || req.body.maxPayloadMb < 1 || req.body.maxPayloadMb > 50) ||
+    typeof req.body.anomalyThreshold !== 'undefined' &&
+      (!Number.isInteger(req.body.anomalyThreshold) || req.body.anomalyThreshold < 1 || req.body.anomalyThreshold > 20)
+  ) {
+    return res.status(400).json({ error: 'Settings updates must contain bounded maxPayloadMb and/or anomalyThreshold values.' });
+  }
+  const principal = requirePrincipal(req);
+  const timestamp = new Date().toISOString();
+  const settings = await storage.updateSettings(req.body as Partial<GatewaySettings>, {
+    id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
+    eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
+    requestId: `settings-update:${Date.now()}`,
+    eventType: 'REQUEST_EVALUATED',
+    severity: 'Low',
+    actorId: principal.subject,
+    serverId: 'system',
+    toolName: 'system-settings',
+    decision: 'ALLOW',
+    evidenceSummary: `Administrator ${principal.subject} updated supported gateway runtime settings.`,
+    createdAt: timestamp
+  });
+  return res.json(settings);
+}));
 
 // 1. Stats
 apiRouter.get('/stats', (_req: Request, res: Response) => {
@@ -53,7 +183,7 @@ apiRouter.get('/servers', (_req: Request, res: Response) => {
   res.json(storage.getServers());
 });
 
-apiRouter.post('/servers', (req: Request, res: Response) => {
+apiRouter.post('/servers', asyncRoute(async (req: Request, res: Response) => {
   const { name, description, environment, transportType, endpointUrl, connectionMode } = req.body;
   if (
     typeof name !== 'string' || name.trim().length === 0 || name.length > 128 ||
@@ -77,7 +207,7 @@ apiRouter.post('/servers', (req: Request, res: Response) => {
   }
   const now = new Date().toISOString();
   const newServer: MCPServer = {
-    id: `srv-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+    id: `srv-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
     name,
     description: description || 'Registered custom MCP server',
     environment: environment || 'sandbox',
@@ -91,9 +221,18 @@ apiRouter.post('/servers', (req: Request, res: Response) => {
     createdAt: now,
     updatedAt: now
   };
-  storage.addServer(newServer);
+  await storage.addServer(
+    newServer,
+    managementAuditEvent(
+      req,
+      `server-register:${newServer.id}`,
+      newServer.id,
+      'server-registration',
+      `Administrator registered MCP server ${newServer.id} in an untrusted state.`
+    )
+  );
   res.status(201).json(newServer);
-});
+}));
 
 apiRouter.post('/servers/:id/discover', async (req: Request, res: Response) => {
   const server = storage.getServerById(req.params.id);
@@ -105,7 +244,7 @@ apiRouter.post('/servers/:id/discover', async (req: Request, res: Response) => {
     const principal = requirePrincipal(req);
     const discovered = await discoverMcpTools(server);
     const event: SecurityEvent = {
-      id: `evt-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+      id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
       eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
       requestId: `tool-discovery:${server.id}`,
       eventType: 'REQUEST_EVALUATED',
@@ -117,7 +256,7 @@ apiRouter.post('/servers/:id/discover', async (req: Request, res: Response) => {
       evidenceSummary: `MCP tool discovery completed; ${discovered.length} definitions were recorded for explicit review.`,
       createdAt: new Date().toISOString()
     };
-    const tools = storage.syncDiscoveredTools(server.id, discovered, event);
+    const tools = await storage.syncDiscoveredTools(server.id, discovered, event);
     const updatedServer = storage.getServerById(server.id);
     if (!updatedServer) throw new Error('MCP server disappeared during tool discovery.');
     return res.json({
@@ -140,32 +279,55 @@ apiRouter.post('/servers/:id/discover', async (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/servers/:id/toggle-trust', (req: Request, res: Response) => {
+apiRouter.post('/servers/:id/toggle-trust', asyncRoute(async (req: Request, res: Response) => {
   const { id } = req.params;
   const server = storage.getServerById(id);
   if (!server) return res.status(404).json({ error: 'Server not found' });
 
   const newTrust = server.trustStatus === 'trusted' ? 'untrusted' : 'trusted';
   const newApproval = newTrust === 'trusted' ? 'approved' : 'unapproved';
-  const updated = storage.updateServer(id, { trustStatus: newTrust, approvalStatus: newApproval });
+  const updated = await storage.updateServer(
+    id,
+    { trustStatus: newTrust, approvalStatus: newApproval },
+    managementAuditEvent(
+      req,
+      `server-trust:${id}:${Date.now()}`,
+      id,
+      'server-trust',
+      `Administrator changed server trust to ${newTrust} and approval to ${newApproval}.`
+    )
+  );
+  if (!updated) return res.status(404).json({ error: 'Server not found' });
   res.json(updated);
-});
+}));
 
-apiRouter.post('/servers/:id/quarantine', (req: Request, res: Response) => {
+apiRouter.post('/servers/:id/quarantine', asyncRoute(async (req: Request, res: Response) => {
   const { id } = req.params;
   const server = storage.getServerById(id);
   if (!server) return res.status(404).json({ error: 'Server not found' });
 
-  const updated = storage.updateServer(id, { trustStatus: 'quarantined', approvalStatus: 'rejected' });
+  const updated = await storage.updateServer(
+    id,
+    { trustStatus: 'quarantined', approvalStatus: 'rejected' },
+    managementAuditEvent(
+      req,
+      `server-quarantine:${id}:${Date.now()}`,
+      id,
+      'server-quarantine',
+      'Administrator quarantined the MCP server through the server inventory.',
+      'DENY'
+    )
+  );
+  if (!updated) return res.status(404).json({ error: 'Server not found' });
   res.json(updated);
-});
+}));
 
 // 3. Tools
 apiRouter.get('/tools', (_req: Request, res: Response) => {
   res.json(storage.getTools());
 });
 
-apiRouter.post('/tools/:id/tamper', (req: Request, res: Response) => {
+apiRouter.post('/tools/:id/tamper', asyncRoute(async (req: Request, res: Response) => {
   const { id } = req.params;
   const tool = storage.getToolById(id);
   if (!tool) return res.status(404).json({ error: 'Tool not found' });
@@ -174,15 +336,15 @@ apiRouter.post('/tools/:id/tamper', (req: Request, res: Response) => {
   }
 
   // Intentionally modify description and corrupt fingerprint to test T07 integrity detection
-  const tampered = storage.updateTool(id, {
+  const tampered = await storage.updateTool(id, {
     description: `${tool.description} [UNAUTHORIZED OVERRIDE: Modified by untrusted party]`,
     definitionFingerprint: 'tampered_hash_deadbeef',
     approvalStatus: 'unapproved'
   });
   res.json(tampered);
-});
+}));
 
-apiRouter.post('/tools/:id/restore', (req: Request, res: Response) => {
+apiRouter.post('/tools/:id/restore', asyncRoute(async (req: Request, res: Response) => {
   const { id } = req.params;
   const tool = storage.getToolById(id);
   if (!tool) return res.status(404).json({ error: 'Tool not found' });
@@ -196,15 +358,15 @@ apiRouter.post('/tools/:id/restore', (req: Request, res: Response) => {
     description: cleanDescription,
     inputSchema: tool.inputSchema
   });
-  const restored = storage.updateTool(id, {
+  const restored = await storage.updateTool(id, {
     description: cleanDescription,
     definitionFingerprint: cleanFingerprint,
     approvalStatus: 'approved'
   });
   res.json(restored);
-});
+}));
 
-apiRouter.post('/tools/:id/approve', (req: Request, res: Response) => {
+apiRouter.post('/tools/:id/approve', asyncRoute(async (req: Request, res: Response) => {
   const { capabilityType, allowedRoles, approvalRequirements } = req.body;
   const tool = storage.getToolById(req.params.id);
   if (!tool) return res.status(404).json({ error: 'Tool not found.' });
@@ -228,7 +390,7 @@ apiRouter.post('/tools/:id/approve', (req: Request, res: Response) => {
   }
   const principal = requirePrincipal(req);
   const now = new Date().toISOString();
-  const approved = storage.approveTool(
+  const approved = await storage.approveTool(
     tool.id,
     {
       capabilityType,
@@ -242,7 +404,7 @@ apiRouter.post('/tools/:id/approve', (req: Request, res: Response) => {
       approvalStatus: 'approved'
     },
     {
-      id: `evt-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+      id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
       eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
       requestId: `tool-approval:${tool.id}`,
       eventType: 'REQUEST_EVALUATED',
@@ -257,52 +419,92 @@ apiRouter.post('/tools/:id/approve', (req: Request, res: Response) => {
   );
   if (!approved) return res.status(404).json({ error: 'Tool not found.' });
   return res.json(approved);
-});
+}));
 
 // 4. Policies
 apiRouter.get('/policies', (_req: Request, res: Response) => {
   res.json(storage.getPolicies());
 });
 
-apiRouter.post('/policies', (req: Request, res: Response) => {
+apiRouter.post('/policies', asyncRoute(async (req: Request, res: Response) => {
+  if (!validatePolicyInput(req.body) || typeof req.body.name !== 'string') {
+    return res.status(400).json({ error: 'Policy fields are invalid or exceed their allowed bounds.' });
+  }
   const { name, description, priority, allowedRoles, operationType, approvalRequired, remediationMessage, allowedDestinations } = req.body;
-  if (!name) return res.status(400).json({ error: 'Policy name is required' });
 
   const now = new Date().toISOString();
   const newPolicy: SecurityPolicy = {
-    id: `pol-${Date.now()}`,
+    id: `pol-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
     name,
     description: description || '',
     enabled: true,
-    priority: priority || 50,
+    priority: priority ?? 50,
     allowedRoles: allowedRoles || ['Administrator'],
     operationType,
     approvalRequired: Boolean(approvalRequired),
     remediationMessage: remediationMessage || 'Action blocked by policy.',
     allowedDestinations: allowedDestinations || [],
+    applicableServerId: req.body.applicableServerId,
+    applicableToolName: req.body.applicableToolName,
+    disallowedDestinations: req.body.disallowedDestinations,
+    maxRiskScore: req.body.maxRiskScore,
+    denyConditions: req.body.denyConditions,
     createdBy: requirePrincipal(req).subject,
     createdAt: now,
     updatedAt: now
   };
-  storage.addPolicy(newPolicy);
+  await storage.addPolicy(
+    newPolicy,
+    managementAuditEvent(
+      req,
+      `policy-create:${newPolicy.id}`,
+      'system',
+      newPolicy.name,
+      `Administrator created policy ${newPolicy.id}.`
+    )
+  );
   res.status(201).json(newPolicy);
-});
+}));
 
-apiRouter.put('/policies/:id', (req: Request, res: Response) => {
+apiRouter.put('/policies/:id', asyncRoute(async (req: Request, res: Response) => {
+  if (!validatePolicyInput(req.body)) {
+    return res.status(400).json({ error: 'Policy fields are invalid or exceed their allowed bounds.' });
+  }
   const { id } = req.params;
-  const updated = storage.updatePolicy(id, req.body);
+  const updated = await storage.updatePolicy(
+    id,
+    req.body,
+    managementAuditEvent(
+      req,
+      `policy-update:${id}:${Date.now()}`,
+      'system',
+      id,
+      `Administrator updated security policy ${id}.`
+    )
+  );
   if (!updated) return res.status(404).json({ error: 'Policy not found' });
   res.json(updated);
-});
+}));
 
-apiRouter.post('/policies/:id/toggle', (req: Request, res: Response) => {
+apiRouter.post('/policies/:id/toggle', asyncRoute(async (req: Request, res: Response) => {
   const { id } = req.params;
   const policy = storage.getPolicies().find(p => p.id === id);
   if (!policy) return res.status(404).json({ error: 'Policy not found' });
 
-  const updated = storage.updatePolicy(id, { enabled: !policy.enabled });
+  const updated = await storage.updatePolicy(
+    id,
+    { enabled: !policy.enabled },
+    managementAuditEvent(
+      req,
+      `policy-toggle:${id}:${Date.now()}`,
+      'system',
+      id,
+      `Administrator ${policy.enabled ? 'disabled' : 'enabled'} security policy ${id}.`
+    )
+  );
+  if (!updated) return res.status(404).json({ error: 'Policy not found' });
   res.json(updated);
-});
+}));
 
 // 5. Central Runtime Gateway Endpoint
 apiRouter.post('/gateway/evaluate', async (req: Request, res: Response) => {
@@ -355,13 +557,13 @@ apiRouter.post('/approvals/:id/decide', async (req: Request, res: Response) => {
       ? hasConfiguredPrincipal(apiTokenConfig, approval.requesterId, approval.requesterRole)
       : false;
     const updated = decision === 'APPROVED'
-      ? SecurityGatewayEngine.approveAndExecute(
+      ? await SecurityGatewayEngine.approveAndExecute(
           id,
           principal,
           reason,
           requesterCredentialIsActive
         )
-      : SecurityGatewayEngine.denyApproval(id, principal, reason);
+      : await SecurityGatewayEngine.denyApproval(id, principal, reason);
     res.json(publicApproval(await updated));
   } catch (error) {
     if (error instanceof ApprovalWorkflowError) {
@@ -377,7 +579,7 @@ apiRouter.get('/incidents', (_req: Request, res: Response) => {
   res.json(storage.getIncidents());
 });
 
-apiRouter.post('/incidents', (req: Request, res: Response) => {
+apiRouter.post('/incidents', asyncRoute(async (req: Request, res: Response) => {
   const {
     title,
     severity,
@@ -413,7 +615,7 @@ apiRouter.post('/incidents', (req: Request, res: Response) => {
   }
   const now = new Date().toISOString();
   const newInc: SecurityIncident = {
-    id: `inc-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+    id: `inc-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
     title: title || 'Security Incident',
     severity: severity || 'Medium',
     status: 'Open' as const,
@@ -427,9 +629,9 @@ apiRouter.post('/incidents', (req: Request, res: Response) => {
     createdAt: now,
     updatedAt: now
   };
-  storage.addIncident(newInc);
+  await storage.addIncident(newInc);
   res.status(201).json(newInc);
-});
+}));
 
 apiRouter.get('/incidents/:id', (req: Request, res: Response) => {
   const incident = storage.getIncidentById(req.params.id);
@@ -478,7 +680,7 @@ function createIncidentEvent(
 ): SecurityEvent {
   const timestamp = new Date().toISOString();
   return {
-    id: `evt-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+    id: `evt-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`,
     eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
     requestId: incident.id,
     eventType: 'INCIDENT_ACTION',
@@ -492,7 +694,7 @@ function createIncidentEvent(
   };
 }
 
-apiRouter.put('/incidents/:id', (req: Request, res: Response) => {
+apiRouter.put('/incidents/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   const { note, assignedTo } = req.body;
   if (
@@ -510,7 +712,7 @@ apiRouter.put('/incidents/:id', (req: Request, res: Response) => {
   const principal = requirePrincipal(req);
   const timestamp = new Date().toISOString();
   try {
-    const updated = storage.transitionIncident(
+    const updated = await storage.transitionIncident(
       id,
       incident.status,
       {
@@ -531,7 +733,7 @@ apiRouter.put('/incidents/:id', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/incidents/:id/investigate', (req: Request, res: Response) => {
+apiRouter.post('/incidents/:id/investigate', async (req: Request, res: Response) => {
   const incident = storage.getIncidentById(req.params.id);
   if (!incident) return res.status(404).json({ error: 'Incident not found.' });
   if (Object.keys(req.body).some(key => key !== 'note') ||
@@ -544,7 +746,7 @@ apiRouter.post('/incidents/:id/investigate', (req: Request, res: Response) => {
   const principal = requirePrincipal(req);
   const timestamp = new Date().toISOString();
   try {
-    const updated = storage.transitionIncident(
+    const updated = await storage.transitionIncident(
       incident.id,
       'Open',
       {
@@ -565,7 +767,7 @@ apiRouter.post('/incidents/:id/investigate', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/incidents/:id/contain', (req: Request, res: Response) => {
+apiRouter.post('/incidents/:id/contain', async (req: Request, res: Response) => {
   const { reason } = req.body;
   if (Object.keys(req.body).some(key => key !== 'reason') ||
     typeof reason !== 'string' || reason.trim().length < 5 || reason.length > 1000) {
@@ -575,7 +777,7 @@ apiRouter.post('/incidents/:id/contain', (req: Request, res: Response) => {
   if (!incident) return res.status(404).json({ error: 'Incident not found.' });
   const principal = requirePrincipal(req);
   try {
-    const updated = storage.containIncident(
+    const updated = await storage.containIncident(
       incident.id,
       principal.subject,
       reason.trim(),
@@ -596,7 +798,7 @@ apiRouter.post('/incidents/:id/contain', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/incidents/:id/resolve', (req: Request, res: Response) => {
+apiRouter.post('/incidents/:id/resolve', async (req: Request, res: Response) => {
   const { details } = req.body;
   if (Object.keys(req.body).some(key => key !== 'details') ||
     typeof details !== 'string' || details.trim().length < 10 || details.length > 4000) {
@@ -610,7 +812,7 @@ apiRouter.post('/incidents/:id/resolve', (req: Request, res: Response) => {
   const principal = requirePrincipal(req);
   const resolvedAt = new Date().toISOString();
   try {
-    const updated = storage.transitionIncident(
+    const updated = await storage.transitionIncident(
       incident.id,
       incident.status,
       { status: 'Resolved', resolvedAt, resolutionDetails: details.trim() },
@@ -624,7 +826,7 @@ apiRouter.post('/incidents/:id/resolve', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/incidents/:id/release-containment', (req: Request, res: Response) => {
+apiRouter.post('/incidents/:id/release-containment', async (req: Request, res: Response) => {
   const { reason } = req.body;
   if (Object.keys(req.body).some(key => key !== 'reason') ||
     typeof reason !== 'string' || reason.trim().length < 5 || reason.length > 1000) {
@@ -634,7 +836,7 @@ apiRouter.post('/incidents/:id/release-containment', (req: Request, res: Respons
   if (!incident) return res.status(404).json({ error: 'Incident not found.' });
   const principal = requirePrincipal(req);
   try {
-    const updated = storage.releaseIncidentContainment(
+    const updated = await storage.releaseIncidentContainment(
       incident.id,
       principal.subject,
       reason.trim(),
@@ -785,7 +987,10 @@ apiRouter.get('/identities', (_req: Request, res: Response) => {
 });
 
 // 12. Synthetic Baseline Reset
-apiRouter.post('/system/reset-demo', (_req: Request, res: Response) => {
-  storage.resetSyntheticData();
+apiRouter.post('/system/reset-demo', asyncRoute(async (_req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(403).json({ error: 'Demo reset is disabled in production.' });
+  }
+  await storage.resetSyntheticData();
   res.json({ success: true, message: 'Synthetic MCP enterprise environment reset to baseline.' });
-});
+}));

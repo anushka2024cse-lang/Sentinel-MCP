@@ -10,7 +10,8 @@ import {
   SecurityTestScenario,
   SecurityTestRun,
   IdentityProfile,
-  SystemStats
+  SystemStats,
+  GatewaySettings
 } from '../types/index.js';
 
 const ACCESS_TOKEN_KEY = 'sentinel-api-token';
@@ -44,6 +45,22 @@ export const api = {
   async getSession(): Promise<ApiSession> {
     const res = await apiFetch('/api/auth/session');
     if (!res.ok) throw await responseError(res, 'Authentication failed');
+    return res.json();
+  },
+
+  async getSettings(): Promise<GatewaySettings> {
+    const res = await apiFetch('/api/settings');
+    if (!res.ok) throw await responseError(res, 'Failed to fetch system settings');
+    return res.json();
+  },
+
+  async updateSettings(updates: Pick<GatewaySettings, 'maxPayloadMb' | 'anomalyThreshold'>): Promise<GatewaySettings> {
+    const res = await apiFetch('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates)
+    });
+    if (!res.ok) throw await responseError(res, 'Failed to save system settings');
     return res.json();
   },
 

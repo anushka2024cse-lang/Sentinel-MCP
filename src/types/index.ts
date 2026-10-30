@@ -113,7 +113,7 @@ export interface SecurityEvent {
   id: string;
   eventId: string;
   requestId: string;
-  eventType: 'REQUEST_EVALUATED' | 'TOOL_INVOCATION_DENIED' | 'UNAUTHENTICATED_ACCESS' | 'DATA_LEAK_PREVENTED' | 'PROMPT_INJECTION_DETECTED' | 'TOOL_DEFINITION_CHANGED' | 'RATE_LIMIT_TRIGGERED' | 'SCHEMA_VIOLATION' | 'APPROVAL_DISPATCHED' | 'DIRECT_BYPASS_ATTEMPT' | 'INCIDENT_ACTION';
+  eventType: 'REQUEST_EVALUATED' | 'TOOL_INVOCATION_DENIED' | 'UNAUTHENTICATED_ACCESS' | 'DATA_LEAK_PREVENTED' | 'PROMPT_INJECTION_DETECTED' | 'TOOL_DEFINITION_CHANGED' | 'RATE_LIMIT_TRIGGERED' | 'SCHEMA_VIOLATION' | 'APPROVAL_DISPATCHED' | 'DIRECT_BYPASS_ATTEMPT' | 'INCIDENT_ACTION' | 'ADMIN_ACTION';
   severity: RiskCategory;
   actorId: string;
   serverId: string;
@@ -292,4 +292,10 @@ export interface SystemStats {
   failedTests: number;
   inconclusiveTests: number;
   testPassRate: number;
+}
+
+export interface GatewaySettings {
+  defaultDeny: true;
+  maxPayloadMb: number;
+  anomalyThreshold: number;
 }

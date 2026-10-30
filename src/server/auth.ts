@@ -209,6 +209,7 @@ function permissionForRequest(request: Request): Permission {
 
   if (method === 'GET') {
     if (path === '/stats' || path === '/auth/session' || path === '/requests' || path === '/findings') return 'gateway.read';
+    if (path === '/settings') return 'gateway.read';
     if (path === '/servers') return 'servers.read';
     if (path === '/tools') return 'tools.read';
     if (path === '/policies') return 'policies.read';
@@ -218,6 +219,8 @@ function permissionForRequest(request: Request): Permission {
     if (path === '/tests/scenarios' || path === '/tests/runs') return 'security-tests.read';
     if (path === '/identities') return 'identities.read';
   }
+
+  if (method === 'PATCH' && path === '/settings') return 'system.manage';
 
   if (method === 'POST') {
     if (path === '/servers' || /^\/servers\/[^/]+\/(?:toggle-trust|quarantine|discover)$/.test(path)) return 'servers.manage';

@@ -2,6 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import {
+  AnyBulkWriteOperation,
+  Collection,
+  Db,
+  Document,
+  MongoServerError
+} from 'mongodb';
+import { initializeMongo } from './mongo.js';
+import {
   MCPServer,
   MCPTool,
   SecurityPolicy,
@@ -14,7 +22,8 @@ import {
   SecurityTestRun,
   IdentityProfile,
   SystemStats,
-  UserRole
+  UserRole,
+  GatewaySettings
 } from '../types/index.js';
 
 interface DatabaseSchema {
@@ -29,6 +38,7 @@ interface DatabaseSchema {
   scenarios: SecurityTestScenario[];
   testRuns: SecurityTestRun[];
   identities: IdentityProfile[];
+  settings: GatewaySettings;
   syntheticData: {
     inventory: Array<{ id: string; sku: string; name: string; quantity: number; location: string }>;
     shipments: Array<{ id: string; trackingNumber: string; status: string; destination: string }>;
@@ -38,10 +48,47 @@ interface DatabaseSchema {
   };
 }
 
+const DEFAULT_GATEWAY_SETTINGS: GatewaySettings = {
+  defaultDeny: true,
+  maxPayloadMb: 10,
+  anomalyThreshold: 3
+};
+
+const COLLECTIONS = {
+  servers: 'mcp_servers',
+  tools: 'mcp_tools',
+  policies: 'security_policies',
+  requests: 'security_requests',
+  events: 'audit_events',
+  findings: 'security_findings',
+  approvals: 'approval_requests',
+  incidents: 'security_incidents',
+  scenarios: 'security_test_scenarios',
+  testRuns: 'security_test_runs',
+  identities: 'identity_profiles'
+} as const;
+type StoredDocument = Document & { _id: string };
+
+const FIXTURE_MODE = process.env.NODE_ENV === 'test' &&
+  process.env.SENTINEL_STORAGE_DRIVER === 'json-fixture';
 const DB_FILE = path.resolve(
   process.cwd(),
   process.env.SENTINEL_DB_FILE || path.join('data', 'sentinel-db.json')
 );
+
+function clone<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function removeMongoId<T extends StoredDocument>(document: T): Omit<T, '_id'> {
+  const { _id: _id, ...value } = document;
+  return value;
+}
+
+function publicStoredIdentity(identity: IdentityProfile): Omit<IdentityProfile, 'ephemeralToken'> {
+  const { ephemeralToken: _ephemeralToken, ...safeIdentity } = identity;
+  return safeIdentity;
+}
 
 // Helper to compute sha256 fingerprint for tool definitions
 export function computeFingerprint(tool: { name: string; description: string; inputSchema: unknown }): string {
@@ -55,20 +102,138 @@ export function computeFingerprint(tool: { name: string; description: string; in
 
 export class StorageEngine {
   private data: DatabaseSchema;
+  private readonly fixtureMode: boolean;
+  private database?: Db;
+  private initialized = false;
+  private gatewaySettings: GatewaySettings = { ...DEFAULT_GATEWAY_SETTINGS };
+  private persistedData: DatabaseSchema;
+  private persistedSettings: GatewaySettings = { ...DEFAULT_GATEWAY_SETTINGS };
+  private writeQueue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly dbFile = DB_FILE) {
-    this.data = this.loadDatabase();
-    if (this.data.servers.length === 0) {
+  constructor(
+    private readonly dbFile = DB_FILE,
+    fixtureMode = FIXTURE_MODE || arguments.length > 0,
+    private readonly injectedDatabase?: Db
+  ) {
+    this.fixtureMode = fixtureMode;
+    this.data = this.fixtureMode ? this.loadDatabase() : this.getEmptyDatabase();
+    this.gatewaySettings = this.validateGatewaySettings(this.data.settings);
+    if (
+      this.fixtureMode &&
+      process.env.NODE_ENV === 'test' &&
+      process.env.SENTINEL_TEST_SEED_DEMO === 'true' &&
+      this.data.servers.length === 0
+    ) {
       this.seedInitialData();
-      this.saveDatabase();
     }
+    this.persistedData = clone(this.data);
+    this.persistedSettings = { ...this.gatewaySettings };
+  }
+
+  public async initialize(): Promise<void> {
+    if (this.initialized) return;
+    if (this.fixtureMode) {
+      this.initialized = true;
+      return;
+    }
+
+    this.database = this.injectedDatabase || await initializeMongo();
+    await this.ensureIndexes(this.database);
+    const entries = await Promise.all(Object.entries(COLLECTIONS).map(async ([key, collectionName]) => {
+      const documents = await this.database!.collection<StoredDocument>(collectionName).find({}).toArray();
+      return [key, documents.map(document => removeMongoId(document) as never)] as const;
+    }));
+    const loaded = this.getEmptyDatabase();
+    for (const [key, documents] of entries) {
+      (loaded as unknown as Record<string, unknown>)[key] = documents;
+    }
+
+    const settingsCollection = this.database.collection<StoredDocument>('system_settings');
+    const [persistedSettings, persistedSyntheticData] = await Promise.all([
+      settingsCollection.findOne({ _id: 'gateway-runtime' }),
+      settingsCollection.findOne({ _id: 'synthetic-data' })
+    ]);
+    if (persistedSettings?.value && typeof persistedSettings.value === 'object') {
+      this.gatewaySettings = this.validateGatewaySettings(persistedSettings.value);
+    }
+    if (persistedSyntheticData?.value && typeof persistedSyntheticData.value === 'object') {
+      loaded.syntheticData = persistedSyntheticData.value as DatabaseSchema['syntheticData'];
+    }
+    loaded.settings = this.gatewaySettings;
+
+    this.data = loaded;
+    this.persistedData = clone(loaded);
+    this.persistedSettings = { ...this.gatewaySettings };
+    this.initialized = true;
+  }
+
+  private async ensureIndexes(database: Db): Promise<void> {
+    const indexDefinitions: Array<[string, Document, { unique?: boolean; name: string }]> = [
+      ['mcp_tools', { serverId: 1, name: 1 }, { unique: true, name: 'server_tool_unique' }],
+      ['mcp_tools', { serverId: 1 }, { name: 'server_id' }],
+      ['mcp_tools', { approvalStatus: 1 }, { name: 'approval_status' }],
+      ['mcp_servers', { trustStatus: 1, approvalStatus: 1 }, { name: 'server_trust_approval' }],
+      ['security_policies', { enabled: 1, priority: 1 }, { name: 'policy_enabled_priority' }],
+      ['security_requests', { requestId: 1 }, { unique: true, name: 'request_id_unique' }],
+      ['security_requests', { serverId: 1, createdAt: -1 }, { name: 'request_server_created' }],
+      ['security_requests', { createdAt: -1 }, { name: 'request_created' }],
+      ['audit_events', { eventId: 1 }, { unique: true, name: 'event_id_unique' }],
+      ['audit_events', { requestId: 1, createdAt: -1 }, { name: 'event_request_created' }],
+      ['audit_events', { serverId: 1, createdAt: -1 }, { name: 'event_server_created' }],
+      ['security_findings', { requestId: 1, createdAt: -1 }, { name: 'finding_request_created' }],
+      ['security_findings', { createdAt: -1 }, { name: 'finding_created' }],
+      ['approval_requests', { requestId: 1 }, { unique: true, name: 'approval_request_id_unique' }],
+      ['approval_requests', { status: 1, expiresAt: 1 }, { name: 'approval_status_expiry' }],
+      ['security_incidents', { status: 1, updatedAt: -1 }, { name: 'incident_status_updated' }],
+      ['security_incidents', { affectedServerId: 1 }, { name: 'incident_server' }],
+      ['security_test_scenarios', { testId: 1 }, { unique: true, name: 'scenario_test_id_unique' }],
+      ['security_test_runs', { testRunId: 1 }, { unique: true, name: 'test_run_id_unique' }],
+      ['security_test_runs', { scenarioId: 1, createdAt: -1 }, { name: 'test_run_scenario_created' }]
+    ];
+
+    await Promise.all(indexDefinitions.map(([collectionName, keys, options]) =>
+      database.collection(collectionName).createIndex(keys, options)
+    ));
+  }
+
+  private appendEvent(event: SecurityEvent): void {
+    this.data.events.unshift(event);
+    if (this.data.events.length > 1000) this.data.events.pop();
+  }
+
+  private validateGatewaySettings(value: unknown): GatewaySettings {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new Error('Stored gateway settings are malformed.');
+    }
+
+    const settings = value as Record<string, unknown>;
+    if (
+      settings.defaultDeny !== true ||
+      !Number.isInteger(settings.maxPayloadMb) ||
+      (settings.maxPayloadMb as number) < 1 ||
+      (settings.maxPayloadMb as number) > 50 ||
+      !Number.isInteger(settings.anomalyThreshold) ||
+      (settings.anomalyThreshold as number) < 1 ||
+      (settings.anomalyThreshold as number) > 20
+    ) {
+      throw new Error('Stored gateway settings are outside the allowed configuration bounds.');
+    }
+    return {
+      defaultDeny: true,
+      maxPayloadMb: settings.maxPayloadMb as number,
+      anomalyThreshold: settings.anomalyThreshold as number
+    };
   }
 
   private loadDatabase(): DatabaseSchema {
     try {
       if (fs.existsSync(this.dbFile)) {
         const raw = fs.readFileSync(this.dbFile, 'utf-8');
-        return JSON.parse(raw);
+        const parsed = JSON.parse(raw) as Partial<DatabaseSchema>;
+        const empty = this.getEmptyDatabase();
+        const loaded = { ...empty, ...parsed, syntheticData: parsed.syntheticData || empty.syntheticData };
+        loaded.settings = this.validateGatewaySettings(parsed.settings || DEFAULT_GATEWAY_SETTINGS);
+        return loaded;
       }
     } catch (e) {
       throw new Error(`Failed to load Sentinel database at ${this.dbFile}.`, { cause: e });
@@ -76,15 +241,208 @@ export class StorageEngine {
     return this.getEmptyDatabase();
   }
 
-  private saveDatabase(): void {
-    const dir = path.dirname(this.dbFile);
-    fs.mkdirSync(dir, { recursive: true });
-    const tempFile = `${this.dbFile}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+  private async saveDatabase(): Promise<void> {
+    const snapshot = clone(this.data);
+    const settingsSnapshot = { ...this.gatewaySettings };
+    const write = this.writeQueue.then(async () => {
+      if (this.fixtureMode) {
+        const dir = path.dirname(this.dbFile);
+        fs.mkdirSync(dir, { recursive: true });
+        const tempFile = `${this.dbFile}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
+        try {
+          fs.writeFileSync(tempFile, JSON.stringify(snapshot, null, 2), { encoding: 'utf8', flag: 'wx' });
+          fs.renameSync(tempFile, this.dbFile);
+        } finally {
+          if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+        }
+        this.persistedData = snapshot;
+        this.persistedSettings = settingsSnapshot;
+        return;
+      }
+
+      if (!this.initialized || !this.database) {
+        throw new Error('MongoDB storage is not initialized; writes are unavailable.');
+      }
+      const operations = this.buildMongoOperations(snapshot, settingsSnapshot);
+      if (operations.length > 0) await this.persistMongoOperations(operations);
+      this.persistedData = snapshot;
+      this.persistedSettings = settingsSnapshot;
+    });
+    this.writeQueue = write.catch(() => undefined);
     try {
-      fs.writeFileSync(tempFile, JSON.stringify(this.data, null, 2), { encoding: 'utf8', flag: 'wx' });
-      fs.renameSync(tempFile, this.dbFile);
+      await write;
+    } catch (error) {
+      if (JSON.stringify(this.data) === JSON.stringify(snapshot)) {
+        this.data = clone(this.persistedData);
+        this.gatewaySettings = { ...this.persistedSettings };
+      }
+      throw error;
+    }
+  }
+
+  private buildMongoOperations(
+    snapshot: DatabaseSchema,
+    settingsSnapshot: GatewaySettings
+  ): Array<{
+    collection: Collection<StoredDocument>;
+    operations: AnyBulkWriteOperation<StoredDocument>[];
+    conditionalOperations: number;
+  }> {
+    const result: Array<{
+      collection: Collection<StoredDocument>;
+      operations: AnyBulkWriteOperation<StoredDocument>[];
+      conditionalOperations: number;
+    }> = [];
+    if (!this.database) throw new Error('MongoDB storage is not initialized.');
+
+    for (const key of Object.keys(COLLECTIONS) as Array<keyof typeof COLLECTIONS>) {
+      const collection = this.database.collection<StoredDocument>(COLLECTIONS[key]);
+      const before = new Map((this.persistedData[key] as Array<{ id: string }>).map(item => [item.id, item]));
+      const after = new Map((snapshot[key] as Array<{ id: string }>).map(item => [item.id, item]));
+      const operations: AnyBulkWriteOperation<StoredDocument>[] = [];
+      let conditionalOperations = 0;
+      for (const [id, item] of after) {
+        const previous = before.get(id);
+        if (JSON.stringify(previous) === JSON.stringify(item)) continue;
+        const record = key === 'identities'
+          ? publicStoredIdentity(item as IdentityProfile)
+          : key === 'requests'
+            ? (() => {
+                const { sanitizedOutput: _sanitizedOutput, ...request } = item as SecurityRequest;
+                return { ...request, arguments: {} };
+              })()
+            : item;
+        const filter: Document = { _id: id };
+        const conditional = previous && (key === 'approvals' || key === 'incidents');
+        if (conditional && key === 'approvals') {
+          const previousApproval = previous as ApprovalRequest;
+          filter.status = previousApproval.status;
+          filter.executionStatus = previousApproval.executionStatus === undefined
+            ? { $exists: false }
+            : previousApproval.executionStatus;
+        } else if (conditional && key === 'incidents') {
+          const previousIncident = previous as SecurityIncident;
+          filter.status = previousIncident.status;
+          filter.updatedAt = previousIncident.updatedAt;
+        }
+        if (conditional) conditionalOperations += 1;
+        operations.push({
+          replaceOne: {
+            filter,
+            replacement: { ...record, _id: id },
+            upsert: !conditional
+          }
+        });
+      }
+      for (const id of before.keys()) {
+        if (!after.has(id)) operations.push({ deleteOne: { filter: { _id: id } } });
+      }
+      if (operations.length > 0) result.push({ collection, operations, conditionalOperations });
+    }
+
+    if (JSON.stringify(this.persistedData.syntheticData) !== JSON.stringify(snapshot.syntheticData)) {
+      result.push({
+        collection: this.database.collection<StoredDocument>('system_settings'),
+        conditionalOperations: 0,
+        operations: [{
+          replaceOne: {
+            filter: { _id: 'synthetic-data' },
+            replacement: {
+              _id: 'synthetic-data',
+              key: 'synthetic-data',
+              value: snapshot.syntheticData,
+              updatedAt: new Date().toISOString()
+            },
+            upsert: true
+          }
+        }]
+      });
+    }
+    if (JSON.stringify(this.persistedSettings) !== JSON.stringify(settingsSnapshot)) {
+      result.push({
+        collection: this.database.collection<StoredDocument>('system_settings'),
+        conditionalOperations: 0,
+        operations: [{
+          replaceOne: {
+            filter: { _id: 'gateway-runtime' },
+            replacement: {
+              _id: 'gateway-runtime',
+              key: 'gateway-runtime',
+              value: settingsSnapshot,
+              updatedAt: new Date().toISOString()
+            },
+            upsert: true
+          }
+        }]
+      });
+    }
+    return result;
+  }
+
+  private async persistMongoOperations(
+    groups: Array<{
+      collection: Collection<StoredDocument>;
+      operations: AnyBulkWriteOperation<StoredDocument>[];
+      conditionalOperations: number;
+    }>
+  ): Promise<void> {
+    const operationCount = groups.reduce((count, group) => count + group.operations.length, 0);
+    if (operationCount === 1) {
+      const [{ collection, operations, conditionalOperations }] = groups;
+      const result = await collection.bulkWrite(operations, {
+        ordered: true,
+        writeConcern: { w: 'majority' }
+      });
+      if (result.matchedCount < conditionalOperations) {
+        throw new Error('The record changed concurrently; reload it and retry.');
+      }
+      return;
+    }
+
+    const session = this.database!.client.startSession();
+    try {
+      await session.withTransaction(async () => {
+        for (const { collection, operations, conditionalOperations } of groups) {
+          const result = await collection.bulkWrite(operations, { ordered: true, session });
+          if (result.matchedCount < conditionalOperations) {
+            throw new Error('The record changed concurrently; reload it and retry.');
+          }
+        }
+      }, { writeConcern: { w: 'majority' } });
+    } catch (error) {
+      if (
+        error instanceof MongoServerError &&
+        (error.code === 20 || error.code === 303 ||
+          /transaction numbers are only allowed|does not support transactions/i.test(error.message))
+      ) {
+        throw new Error(
+          'This related write requires MongoDB transactions. Configure a replica set or sharded cluster.',
+          { cause: error }
+        );
+      }
+      throw error;
     } finally {
-      if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+      await session.endSession();
+    }
+  }
+
+  public getSettings(): GatewaySettings {
+    return { ...this.gatewaySettings };
+  }
+
+  public async updateSettings(updates: Partial<GatewaySettings>, event?: SecurityEvent): Promise<GatewaySettings> {
+    const merged = this.validateGatewaySettings({ ...this.gatewaySettings, ...updates });
+    const previousSettings = this.gatewaySettings;
+    this.gatewaySettings = merged;
+    this.data.settings = merged;
+    if (event) this.appendEvent(event);
+    try {
+      await this.saveDatabase();
+      return this.getSettings();
+    } catch (error) {
+      this.gatewaySettings = previousSettings;
+      this.data.settings = previousSettings;
+      throw error;
     }
   }
 
@@ -101,6 +459,7 @@ export class StorageEngine {
       scenarios: [],
       testRuns: [],
       identities: [],
+      settings: { ...DEFAULT_GATEWAY_SETTINGS },
       syntheticData: {
         inventory: [],
         shipments: [],
@@ -804,6 +1163,7 @@ export class StorageEngine {
       scenarios,
       testRuns: [],
       identities,
+      settings: { ...this.gatewaySettings },
       syntheticData
     };
   }
@@ -817,22 +1177,39 @@ export class StorageEngine {
     return this.data.servers.find(s => s.id === id);
   }
 
-  public addServer(server: MCPServer): MCPServer {
+  public async addServer(server: MCPServer, event?: SecurityEvent): Promise<MCPServer> {
+    const previousEvents = event ? [...this.data.events] : undefined;
     this.data.servers.push(server);
-    this.saveDatabase();
-    return server;
+    if (event) this.appendEvent(event);
+    try {
+      await this.saveDatabase();
+      return server;
+    } catch (error) {
+      this.data.servers = this.data.servers.filter(existing => existing.id !== server.id);
+      if (previousEvents) this.data.events = previousEvents;
+      throw error;
+    }
   }
 
-  public updateServer(id: string, updates: Partial<MCPServer>): MCPServer | null {
+  public async updateServer(id: string, updates: Partial<MCPServer>, event?: SecurityEvent): Promise<MCPServer | null> {
     const idx = this.data.servers.findIndex(s => s.id === id);
     if (idx === -1) return null;
+    const previousServer = this.data.servers[idx];
+    const previousEvents = event ? [...this.data.events] : undefined;
     this.data.servers[idx] = {
-      ...this.data.servers[idx],
+      ...previousServer,
       ...updates,
       updatedAt: new Date().toISOString()
     };
-    this.saveDatabase();
-    return this.data.servers[idx];
+    if (event) this.appendEvent(event);
+    try {
+      await this.saveDatabase();
+      return this.data.servers[idx];
+    } catch (error) {
+      this.data.servers[idx] = previousServer;
+      if (previousEvents) this.data.events = previousEvents;
+      throw error;
+    }
   }
 
   // Tools
@@ -848,7 +1225,7 @@ export class StorageEngine {
     return this.data.tools.find(t => t.id === id);
   }
 
-  public syncDiscoveredTools(
+  public async syncDiscoveredTools(
     serverId: string,
     discovered: Array<{
       name: string;
@@ -857,7 +1234,7 @@ export class StorageEngine {
       fingerprint: string;
     }>,
     event?: SecurityEvent
-  ): MCPTool[] {
+  ): Promise<MCPTool[]> {
     const previousTools = structuredClone(this.data.tools);
     const server = this.getServerById(serverId);
     if (!server) throw new Error(`Cannot sync MCP tools for missing server ${serverId}.`);
@@ -881,9 +1258,11 @@ export class StorageEngine {
         Object.assign(existing, {
           description: observed.description,
           inputSchema: observed.inputSchema,
+          definitionFingerprint: observed.fingerprint,
           approvalStatus: definitionMatches ? existing.approvalStatus : 'unapproved',
           lastObservedAt: now,
-          updatedAt: now
+          updatedAt: now,
+          version: definitionMatches ? existing.version : existing.version + 1
         });
       } else {
         const unapprovedTool: MCPTool = {
@@ -908,10 +1287,10 @@ export class StorageEngine {
       }
     }
 
-    if (event) this.data.events.unshift(event);
+    if (event) this.appendEvent(event);
     this.data.servers[serverIndex] = { ...server, lastCheckedAt: now, updatedAt: now };
     try {
-      this.saveDatabase();
+      await this.saveDatabase();
     } catch (error) {
       this.data.tools = previousTools;
       this.data.servers[serverIndex] = previousServer;
@@ -921,11 +1300,11 @@ export class StorageEngine {
     return this.data.tools.filter(tool => tool.serverId === serverId);
   }
 
-  public approveTool(
+  public async approveTool(
     id: string,
     updates: Pick<MCPTool, 'capabilityType' | 'allowedRoles' | 'approvalRequirements' | 'definitionFingerprint' | 'approvalStatus'>,
     event: SecurityEvent
-  ): MCPTool | null {
+  ): Promise<MCPTool | null> {
     const index = this.data.tools.findIndex(tool => tool.id === id);
     if (index < 0) return null;
     const previousTool = this.data.tools[index];
@@ -937,7 +1316,7 @@ export class StorageEngine {
     };
     this.data.events.unshift(event);
     try {
-      this.saveDatabase();
+      await this.saveDatabase();
     } catch (error) {
       this.data.tools[index] = previousTool;
       this.data.events = previousEvents;
@@ -946,13 +1325,13 @@ export class StorageEngine {
     return this.data.tools[index];
   }
 
-  public addTool(tool: MCPTool): MCPTool {
+  public async addTool(tool: MCPTool): Promise<MCPTool> {
     if (this.getToolByName(tool.serverId, tool.name)) {
       throw new Error(`Tool '${tool.name}' is already registered for server '${tool.serverId}'.`);
     }
     this.data.tools.push(tool);
     try {
-      this.saveDatabase();
+      await this.saveDatabase();
     } catch (error) {
       this.data.tools.pop();
       throw error;
@@ -960,7 +1339,7 @@ export class StorageEngine {
     return tool;
   }
 
-  public updateTool(id: string, updates: Partial<MCPTool>): MCPTool | null {
+  public async updateTool(id: string, updates: Partial<MCPTool>): Promise<MCPTool | null> {
     const idx = this.data.tools.findIndex(t => t.id === id);
     if (idx === -1) return null;
     const previousTool = this.data.tools[idx];
@@ -970,7 +1349,7 @@ export class StorageEngine {
       updatedAt: new Date().toISOString()
     };
     try {
-      this.saveDatabase();
+      await this.saveDatabase();
     } catch (error) {
       this.data.tools[idx] = previousTool;
       throw error;
@@ -983,30 +1362,66 @@ export class StorageEngine {
     return [...this.data.policies].sort((a, b) => a.priority - b.priority);
   }
 
-  public addPolicy(policy: SecurityPolicy): SecurityPolicy {
+  public async addPolicy(policy: SecurityPolicy, event?: SecurityEvent): Promise<SecurityPolicy> {
+    const previousEvents = event ? [...this.data.events] : undefined;
     this.data.policies.push(policy);
-    this.saveDatabase();
-    return policy;
+    if (event) this.appendEvent(event);
+    try {
+      await this.saveDatabase();
+      return policy;
+    } catch (error) {
+      this.data.policies = this.data.policies.filter(existing => existing.id !== policy.id);
+      if (previousEvents) this.data.events = previousEvents;
+      throw error;
+    }
   }
 
-  public updatePolicy(id: string, updates: Partial<SecurityPolicy>): SecurityPolicy | null {
+  public async updatePolicy(
+    id: string,
+    updates: Partial<SecurityPolicy>,
+    event?: SecurityEvent
+  ): Promise<SecurityPolicy | null> {
     const idx = this.data.policies.findIndex(p => p.id === id);
     if (idx === -1) return null;
+    const previousPolicy = this.data.policies[idx];
+    const previousEvents = event ? [...this.data.events] : undefined;
     this.data.policies[idx] = {
-      ...this.data.policies[idx],
+      ...previousPolicy,
       ...updates,
       updatedAt: new Date().toISOString()
     };
-    this.saveDatabase();
-    return this.data.policies[idx];
+    if (event) this.appendEvent(event);
+    try {
+      await this.saveDatabase();
+      return this.data.policies[idx];
+    } catch (error) {
+      this.data.policies[idx] = previousPolicy;
+      if (previousEvents) this.data.events = previousEvents;
+      throw error;
+    }
   }
 
   // Requests & Events
-  public addRequest(request: SecurityRequest): SecurityRequest {
+  public async addRequest(request: SecurityRequest): Promise<SecurityRequest> {
     this.data.requests.unshift(request);
     if (this.data.requests.length > 500) this.data.requests.pop();
-    this.saveDatabase();
+    await this.saveDatabase();
     return request;
+  }
+
+  public async recordGatewayOutcome(
+    request: SecurityRequest,
+    event: SecurityEvent,
+    findings: SensitiveDataFinding[] = [],
+    incident?: SecurityIncident
+  ): Promise<void> {
+    this.data.requests.unshift(request);
+    if (this.data.requests.length > 500) this.data.requests.pop();
+    this.data.events.unshift(event);
+    if (this.data.events.length > 1000) this.data.events.pop();
+    for (const finding of findings) this.data.findings.unshift(finding);
+    if (incident) this.data.incidents.unshift(incident);
+    await this.saveDatabase();
   }
 
   public getRequests(): SecurityRequest[] {
@@ -1017,14 +1432,14 @@ export class StorageEngine {
     return this.data.requests.find(request => request.requestId === requestId);
   }
 
-  public updateRequestByRequestId(requestId: string, updates: Partial<SecurityRequest>): SecurityRequest | null {
+  public async updateRequestByRequestId(requestId: string, updates: Partial<SecurityRequest>): Promise<SecurityRequest | null> {
     const request = this.getRequestByRequestId(requestId);
     if (!request) return null;
     const index = this.data.requests.indexOf(request);
     const previous = request;
     this.data.requests[index] = { ...request, ...updates };
     try {
-      this.saveDatabase();
+      await this.saveDatabase();
     } catch (error) {
       this.data.requests[index] = previous;
       throw error;
@@ -1032,10 +1447,10 @@ export class StorageEngine {
     return this.data.requests[index];
   }
 
-  public addEvent(event: SecurityEvent): SecurityEvent {
+  public async addEvent(event: SecurityEvent): Promise<SecurityEvent> {
     this.data.events.unshift(event);
     if (this.data.events.length > 1000) this.data.events.pop();
-    this.saveDatabase();
+    await this.saveDatabase();
     return event;
   }
 
@@ -1044,9 +1459,9 @@ export class StorageEngine {
   }
 
   // Sensitive Findings
-  public addFinding(finding: SensitiveDataFinding): SensitiveDataFinding {
+  public async addFinding(finding: SensitiveDataFinding): Promise<SensitiveDataFinding> {
     this.data.findings.unshift(finding);
-    this.saveDatabase();
+    await this.saveDatabase();
     return finding;
   }
 
@@ -1055,10 +1470,10 @@ export class StorageEngine {
   }
 
   // Approvals
-  public addApproval(approval: ApprovalRequest): ApprovalRequest {
+  public async addApproval(approval: ApprovalRequest): Promise<ApprovalRequest> {
     this.data.approvals.unshift(approval);
     try {
-      this.saveDatabase();
+      await this.saveDatabase();
     } catch (error) {
       this.data.approvals.shift();
       throw error;
@@ -1066,16 +1481,16 @@ export class StorageEngine {
     return approval;
   }
 
-  public createPendingApproval(
+  public async createPendingApproval(
     approval: ApprovalRequest,
     request: SecurityRequest,
     event: SecurityEvent
-  ): void {
+  ): Promise<void> {
     this.data.approvals.unshift(approval);
     this.data.requests.unshift(request);
     this.data.events.unshift(event);
     try {
-      this.saveDatabase();
+      await this.saveDatabase();
     } catch (error) {
       this.data.approvals.shift();
       this.data.requests.shift();
@@ -1092,13 +1507,14 @@ export class StorageEngine {
     return this.data.approvals.find(approval => approval.id === id);
   }
 
-  public transitionApproval(
+  public async transitionApproval(
     id: string,
     expectedStatus: ApprovalRequest['status'],
     updates: Partial<ApprovalRequest>,
     event?: SecurityEvent,
-    requestUpdates?: Partial<SecurityRequest>
-  ): ApprovalRequest | null {
+    requestUpdates?: Partial<SecurityRequest>,
+    findings: SensitiveDataFinding[] = []
+  ): Promise<ApprovalRequest | null> {
     const index = this.data.approvals.findIndex(approval => approval.id === id);
     if (index === -1 || this.data.approvals[index].status !== expectedStatus) return null;
 
@@ -1107,31 +1523,34 @@ export class StorageEngine {
     const requestIndex = request ? this.data.requests.indexOf(request) : -1;
     const previousRequest = requestIndex >= 0 ? this.data.requests[requestIndex] : undefined;
     const previousEvents = event ? [...this.data.events] : undefined;
+    const previousFindings = [...this.data.findings];
     this.data.approvals[index] = { ...previousApproval, ...updates };
     if (event) this.data.events.unshift(event);
+    for (const finding of findings) this.data.findings.unshift(finding);
     if (requestIndex >= 0 && requestUpdates) {
       this.data.requests[requestIndex] = { ...this.data.requests[requestIndex], ...requestUpdates };
     }
 
     try {
-      this.saveDatabase();
+      await this.saveDatabase();
     } catch (error) {
       this.data.approvals[index] = previousApproval;
       if (requestIndex >= 0 && previousRequest) this.data.requests[requestIndex] = previousRequest;
       if (previousEvents) this.data.events = previousEvents;
+      this.data.findings = previousFindings;
       throw error;
     }
     return this.data.approvals[index];
   }
 
-  public updateApproval(id: string, updates: Partial<ApprovalRequest>): ApprovalRequest | null {
+  public async updateApproval(id: string, updates: Partial<ApprovalRequest>): Promise<ApprovalRequest | null> {
     const idx = this.data.approvals.findIndex(a => a.id === id);
     if (idx === -1) return null;
     this.data.approvals[idx] = {
       ...this.data.approvals[idx],
       ...updates
     };
-    this.saveDatabase();
+    await this.saveDatabase();
     return this.data.approvals[idx];
   }
 
@@ -1152,18 +1571,18 @@ export class StorageEngine {
     );
   }
 
-  public addIncident(incident: SecurityIncident): SecurityIncident {
+  public async addIncident(incident: SecurityIncident): Promise<SecurityIncident> {
     this.data.incidents.unshift(incident);
-    this.saveDatabase();
+    await this.saveDatabase();
     return incident;
   }
 
-  public transitionIncident(
+  public async transitionIncident(
     id: string,
     expectedStatus: SecurityIncident['status'],
     updates: Partial<SecurityIncident>,
     event: SecurityEvent
-  ): SecurityIncident | null {
+  ): Promise<SecurityIncident | null> {
     const index = this.data.incidents.findIndex(incident => incident.id === id);
     if (index < 0 || this.data.incidents[index].status !== expectedStatus) return null;
 
@@ -1176,7 +1595,7 @@ export class StorageEngine {
     };
     this.data.events.unshift(event);
     try {
-      this.saveDatabase();
+      await this.saveDatabase();
     } catch (error) {
       this.data.incidents[index] = previousIncident;
       this.data.events = previousEvents;
@@ -1185,12 +1604,12 @@ export class StorageEngine {
     return this.data.incidents[index];
   }
 
-  public containIncident(
+  public async containIncident(
     id: string,
     actorId: string,
     reason: string,
     event: SecurityEvent
-  ): SecurityIncident | null {
+  ): Promise<SecurityIncident | null> {
     const index = this.data.incidents.findIndex(incident => incident.id === id);
     if (index < 0) return null;
     const incident = this.data.incidents[index];
@@ -1223,7 +1642,7 @@ export class StorageEngine {
     };
     this.data.events.unshift(event);
     try {
-      this.saveDatabase();
+      await this.saveDatabase();
     } catch (error) {
       this.data.servers[serverIndex] = previousServer;
       this.data.incidents[index] = previousIncident;
@@ -1233,12 +1652,12 @@ export class StorageEngine {
     return this.data.incidents[index];
   }
 
-  public releaseIncidentContainment(
+  public async releaseIncidentContainment(
     id: string,
     actorId: string,
     reason: string,
     event: SecurityEvent
-  ): SecurityIncident | null {
+  ): Promise<SecurityIncident | null> {
     const index = this.data.incidents.findIndex(incident => incident.id === id);
     if (index < 0) return null;
     const incident = this.data.incidents[index];
@@ -1261,7 +1680,7 @@ export class StorageEngine {
     };
     this.data.events.unshift(event);
     try {
-      this.saveDatabase();
+      await this.saveDatabase();
     } catch (error) {
       this.data.incidents[index] = previousIncident;
       this.data.events = previousEvents;
@@ -1270,7 +1689,7 @@ export class StorageEngine {
     return this.data.incidents[index];
   }
 
-  public updateIncident(id: string, updates: Partial<SecurityIncident>): SecurityIncident | null {
+  public async updateIncident(id: string, updates: Partial<SecurityIncident>): Promise<SecurityIncident | null> {
     const idx = this.data.incidents.findIndex(i => i.id === id);
     if (idx === -1) return null;
     this.data.incidents[idx] = {
@@ -1278,7 +1697,7 @@ export class StorageEngine {
       ...updates,
       updatedAt: new Date().toISOString()
     };
-    this.saveDatabase();
+    await this.saveDatabase();
     return this.data.incidents[idx];
   }
 
@@ -1291,9 +1710,9 @@ export class StorageEngine {
     return this.data.scenarios.find(s => s.id === id || s.testId === id);
   }
 
-  public addTestRun(run: SecurityTestRun): SecurityTestRun {
+  public async addTestRun(run: SecurityTestRun): Promise<SecurityTestRun> {
     this.data.testRuns.unshift(run);
-    this.saveDatabase();
+    await this.saveDatabase();
     return run;
   }
 
@@ -1310,11 +1729,11 @@ export class StorageEngine {
     return this.data.identities.find(u => u.id === id);
   }
 
-  public updateIdentity(id: string, updates: Partial<IdentityProfile>): IdentityProfile | null {
+  public async updateIdentity(id: string, updates: Partial<IdentityProfile>): Promise<IdentityProfile | null> {
     const idx = this.data.identities.findIndex(u => u.id === id);
     if (idx === -1) return null;
     this.data.identities[idx] = { ...this.data.identities[idx], ...updates };
-    this.saveDatabase();
+    await this.saveDatabase();
     return this.data.identities[idx];
   }
 
@@ -1323,27 +1742,27 @@ export class StorageEngine {
     return this.data.syntheticData;
   }
 
-  public mutateInventory(sku: string, adjustment: number): boolean {
+  public async mutateInventory(sku: string, adjustment: number): Promise<boolean> {
     const item = this.data.syntheticData.inventory.find(i => i.sku === sku);
     if (!item) return false;
     item.quantity += adjustment;
-    this.saveDatabase();
+    await this.saveDatabase();
     return true;
   }
 
-  public recordExternalTransfer(destination: string, payloadSummary: string): void {
+  public async recordExternalTransfer(destination: string, payloadSummary: string): Promise<void> {
     this.data.syntheticData.externalTransferLog.push({
       id: `xfer-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
       destination,
       payloadSummary,
       timestamp: new Date().toISOString()
     });
-    this.saveDatabase();
+    await this.saveDatabase();
   }
 
-  public resetSyntheticData(): void {
+  public async resetSyntheticData(): Promise<void> {
     this.seedInitialData();
-    this.saveDatabase();
+    await this.saveDatabase();
   }
 
   // Computed stats
