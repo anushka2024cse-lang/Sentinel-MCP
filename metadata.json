@@ -1,0 +1,6 @@
+{
+  "name": "SENTINEL-MCP",
+  "description": "Unified MCP Security Gateway, Enterprise Data Protection & Security Testing Lab",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

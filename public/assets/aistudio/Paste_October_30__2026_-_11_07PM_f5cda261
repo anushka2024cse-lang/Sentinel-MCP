@@ -1,0 +1,1378 @@
+# MASTER BUILD PROMPT: SENTINEL-MCP
+## Unified MCP Security Gateway, Enterprise Data Protection & Security Testing Lab
+
+Act as a principal cybersecurity architect, MCP protocol engineer, full-stack software developer, application security specialist, UX designer, and automated testing engineer.
+
+Your task is to BUILD a complete, integrated, professional web application named **SENTINEL-MCP**.
+
+Do not merely generate a landing page, dashboard mockup, design prototype, or list of proposed features. Build the most functional end-to-end implementation supported by the Base44 platform, including the frontend, persistent data models, backend functions, security policies, runtime security workflows, attack simulation environment, verification engine, dashboards, and test reports.
+
+Make implementation decisions autonomously where requirements are sufficiently clear. Prioritise a functioning integrated application over unnecessary clarification questions.
+
+If a capability cannot be implemented reliably within the available platform, identify the limitation and implement the closest safe, clearly labelled alternative. Never claim that an unimplemented capability is working.
+
+---
+
+# 1. PRODUCT IDENTITY
+
+**Product name:** SENTINEL-MCP
+
+**Product category:** MCP Security Gateway and Security Validation Platform.
+
+**Tagline:** Secure the Connection. Test the Defence. Prove the Protection.
+
+**Primary mission:**
+
+Protect organisations from sensitive-information exposure, unauthorised AI tool execution, malicious MCP integrations, prompt injection, excessive permissions, and insecure data transfers.
+
+Provide an integrated Security Testing Lab that evaluates whether the platform's security controls actually prevent defined attacks.
+
+**Target users:**
+- Security engineers.
+- Enterprise IT administrators.
+- AI platform engineers.
+- Security analysts.
+- Application developers.
+- Compliance and risk teams.
+- Hackathon evaluators.
+
+**Primary use case:**
+
+An organisation connects AI assistants to MCP servers that expose business tools, documents, APIs, and databases. SENTINEL-MCP evaluates requests, enforces authorisation policies, protects sensitive information, records security decisions, and allows security teams to validate their controls through controlled attack simulations.
+
+**Core differentiator:**
+
+This is not only an MCP security dashboard. It combines runtime security enforcement with a dedicated, repeatable testing environment that verifies actual security outcomes.
+
+---
+
+# 2. NON-NEGOTIABLE IMPLEMENTATION REQUIREMENTS
+
+Follow these rules throughout development.
+
+1. Build a coherent, integrated application with persistent backend data.
+2. Use Base44 authentication, database entities, server-side functions, and available application capabilities appropriately.
+3. Put sensitive security decisions and privileged operations on the backend, not exclusively in frontend JavaScript.
+4. Validate every security-sensitive request server-side.
+5. Enforce authorisation independently of the AI model's instructions or decisions.
+6. Use a default-deny policy for protected operations when authorisation or required security checks cannot be established.
+7. Separate the security engine from the attack-testing interface.
+8. Route simulated attack requests through the same security decision engine used by normal application requests.
+9. Verify actual tool execution and data-transfer outcomes; do not declare tests passed merely because the interface displays a DENY message.
+10. Maintain an audit trail of security decisions without recording plaintext credentials or unnecessary sensitive data.
+11. Implement explicit PASS, FAIL, and INCONCLUSIVE test outcomes.
+12. Do not use fabricated metrics as real security measurements.
+13. Never expose API keys, private credentials, encryption keys, or privileged backend operations to the browser.
+14. Use synthetic data and simulated protected tools for the initial demonstration.
+15. Do not connect to real defence systems, production databases, or external destinations without explicit configuration and authorisation.
+16. Do not represent simulated authentication, risk scores, alerts, integrations, or server connections as production-grade capabilities.
+17. Do not use a frontend-only mock as evidence of runtime security enforcement.
+18. Keep the application modular so that a real MCP protocol adapter can be implemented or replaced without rebuilding the entire interface.
+
+---
+
+# 3. REQUIRED SYSTEM ARCHITECTURE
+
+Build the application around two major components.
+
+## System A: MCP Security Layer
+
+Responsibilities:
+- MCP server inventory.
+- Identity and authentication checks.
+- RBAC/ABAC and least-privilege policies.
+- Server allowlisting.
+- Runtime tool-call inspection.
+- Prompt-injection risk detection.
+- Tool-definition integrity monitoring.
+- Sensitive-data detection and redaction.
+- Risk evaluation.
+- Approval workflows.
+- Output validation.
+- Monitoring and incident response.
+- Audit logging.
+
+## System B: MCP Security Testing Lab
+
+Responsibilities:
+- Attack scenario library.
+- Controlled attack simulation.
+- Test execution through the security engine.
+- Actual outcome verification.
+- Audit-event verification.
+- Security-control regression tests.
+- Red Team versus Blue Team visualisation.
+- Test result history.
+- Security assessment reports.
+
+## Required logical request flow
+
+AI Client or Test Client
+→ Authentication and Identity
+→ Request Validation
+→ Runtime Security Gateway
+→ Central Policy Engine
+→ Risk Evaluation
+→ Allow / Deny / Require Approval
+→ Protected MCP Tool Execution
+→ Output Security Inspection
+→ Sanitisation or Blocking
+→ Audit Logging
+→ Response to Client.
+
+Monitoring and incident management must consume the relevant security events.
+
+The Security Testing Lab must use the same core policy and security decision logic as the normal request-processing workflow.
+
+If Base44 cannot directly host or proxy a fully functional MCP server, implement a clearly identified simulated MCP environment and a modular backend adapter interface. Do not falsely label the simulated environment as a live MCP connection.
+
+---
+
+# 4. APPLICATION NAVIGATION
+
+Create a professional application shell with persistent sidebar navigation.
+
+Required pages:
+
+1. Overview Dashboard
+2. MCP Server Inventory
+3. Tool Inventory
+4. Identity & Access Control
+5. Security Policies
+6. Runtime Security Monitor
+7. Threat Detection
+8. Data Protection & DLP
+9. Approval Centre
+10. Security Incidents
+11. Audit Trail
+12. Supply-Chain Scanner
+13. Security Testing Lab
+14. Test Results & Reports
+15. Settings
+
+Include:
+- Responsive layout.
+- Search and filtering.
+- Loading, empty, success, and error states.
+- Confirmation dialogs for sensitive actions.
+- Clear severity badges.
+- Useful detail pages and drill-down navigation.
+- Notifications for important security events.
+
+Use role-based access to restrict administrative operations.
+
+Suggested roles:
+- Administrator.
+- Security Analyst.
+- Approver.
+- Read-only Auditor.
+
+Implement server-side permission checks for privileged operations. Do not rely solely on hiding frontend buttons.
+
+---
+
+# 5. VISUAL DESIGN SYSTEM
+
+Create a polished enterprise cybersecurity product.
+
+Design direction:
+- Dark security operations interface.
+- Near-black and deep navy backgrounds.
+- Subtle blue, cyan, green, amber, and red accents.
+- Clear typography and generous spacing.
+- High-quality cards, tables, charts, filters, and detail panels.
+- Restrained glow effects only where they improve visual hierarchy.
+- Consistent icons and status indicators.
+- Strong readability rather than excessive visual effects.
+
+Suggested palette:
+- Background: #080D18
+- Surface: #101827
+- Elevated surface: #172235
+- Primary blue: #3B82F6
+- Cyan: #22D3EE
+- Success: #22C55E
+- Warning: #F59E0B
+- Critical: #EF4444
+- Main text: #F8FAFC
+- Secondary text: #94A3B8
+
+Use accessible contrast and responsive design.
+
+The interface should feel like a serious enterprise security operations platform, not a generic AI SaaS template.
+
+---
+
+# 6. MODULE 1: OVERVIEW DASHBOARD
+
+Create a real dashboard backed by persisted application data.
+
+Display:
+- Registered MCP servers.
+- Approved and unapproved servers.
+- Server connection states.
+- Registered tools.
+- Total tool calls.
+- Allowed requests.
+- Denied requests.
+- Requests requiring approval.
+- Sensitive-data detections.
+- Active security incidents.
+- Recent audit events.
+- Latest security test results.
+- Security-control test pass rate.
+
+Include charts for:
+- Allowed versus denied calls over time.
+- Security events by severity.
+- Threat categories.
+- Security test outcomes.
+- Incident trends.
+
+Add date-range filters and drill-down actions.
+
+Dashboard metrics must be derived from persisted events and test records.
+
+Clearly distinguish simulated test activity from live integration activity.
+
+Do not fabricate production attack counts or claim that a server is protected merely because it appears in the inventory.
+
+---
+
+# 7. MODULE 2: MCP SERVER DISCOVERY & INVENTORY
+
+Create a server inventory page with:
+- Server name.
+- Description.
+- Environment.
+- Transport type.
+- Connection status.
+- Approval status.
+- Last checked timestamp.
+- Number of tools.
+- Security posture.
+- Latest assessment.
+
+Support:
+- Register a server.
+- Edit metadata.
+- Mark a server approved or untrusted.
+- Disable or quarantine a server.
+- View associated tools.
+- View security findings.
+- View definition changes.
+- View audit history.
+
+Provide a demonstration server called "Demo Enterprise MCP Server".
+
+Register synthetic tools such as:
+- get_shipment_status
+- search_documents
+- get_inventory_summary
+- export_financial_report
+- update_inventory
+- delete_test_record
+
+Clearly label these as simulated tools until a real MCP adapter is connected.
+
+Implement a server allowlist.
+
+An unknown or unapproved server must not automatically receive trusted status.
+
+For actual MCP discovery, implement the supported protocol adapter where feasible. Do not assume that arbitrary MCP transports can be supported without protocol-specific code.
+
+---
+
+# 8. MODULE 3: TOOL INVENTORY
+
+For every discovered or simulated tool, store:
+- Tool name.
+- Description.
+- Input schema.
+- Capability classification.
+- Risk category.
+- Required permissions.
+- Allowed user roles.
+- Approval requirements.
+- Definition fingerprint.
+- Last observed timestamp.
+
+Support tool classifications:
+- Read.
+- Write.
+- Export.
+- Destructive.
+- Administrative.
+
+Create a detail page showing the tool definition, permissions, recent invocations, and related security events.
+
+Implement tool-definition change detection.
+
+When a tool definition changes:
+1. Record the change.
+2. Compare the new definition with the previously approved definition.
+3. Generate a security event.
+4. Mark the tool for review when policy requires it.
+5. Block execution if the applicable policy requires re-approval.
+
+Use a cryptographic hash for the stored definition fingerprint where available.
+
+Explain that definition hashing detects changes to the fingerprinted definition; it does not prove that the server's hidden implementation is unchanged.
+
+---
+
+# 9. MODULE 4: IDENTITY, AUTHENTICATION & ACCESS CONTROL
+
+Implement:
+- Authenticated application users.
+- Role-based access control.
+- Per-tool permissions.
+- Least-privilege rules.
+- Read-only roles.
+- Privileged-operation restrictions.
+- Server-side authorisation checks.
+- Session and authentication event logging.
+- An administrative permission-management interface.
+
+Support context-based policy attributes where feasible, including:
+- User role.
+- Tool classification.
+- Data classification.
+- Environment.
+- Requested operation.
+- Approved destination.
+
+Provide example policies:
+- Read-only users cannot modify inventory.
+- Unauthorised users cannot export confidential reports.
+- Destructive tools require explicit permission.
+- Unapproved servers cannot be treated as trusted.
+
+Do not assume that the authenticated Base44 user is automatically the authenticated identity of a remote MCP client. Keep those identity contexts separate.
+
+## Ephemeral credentials
+
+Provide a credential-management interface and an adapter design for short-lived credentials.
+
+Only claim ephemeral credential support where actual issuance, expiry, validation, and revocation are implemented by a supported identity provider or credential service.
+
+Never generate fake tokens and present them as valid remote-server credentials.
+
+---
+
+# 10. MODULE 5: RUNTIME SECURITY GATEWAY
+
+Implement a central server-side security decision function.
+
+The function must accept a validated request containing fields such as:
+- Request ID.
+- Client identity.
+- Server ID.
+- Tool name.
+- Arguments.
+- Requested operation.
+- Environment.
+- Intended destination, where applicable.
+
+The backend must:
+1. Validate the request structure.
+2. Authenticate the requester using the configured mechanism.
+3. Resolve the registered server and tool.
+4. Check server trust status.
+5. Check tool permissions.
+6. Validate arguments against the tool schema.
+7. Evaluate security policies.
+8. Detect relevant risk indicators.
+9. Determine whether approval is required.
+10. Execute only approved operations through the configured adapter.
+11. Inspect tool outputs.
+12. Record security decisions.
+13. Return a structured response.
+
+Supported decisions:
+- ALLOW.
+- DENY.
+- REQUIRE_APPROVAL.
+- SANITIZE_AND_ALLOW, only when the operation can safely be sanitised and policy permits it.
+
+A DENY decision must prevent the protected tool from executing.
+
+An approval-required decision must not execute the protected action until valid approval is obtained.
+
+Do not allow clients to submit their own trusted identity, role, or policy decision without server-side verification.
+
+Implement safe timeouts, error handling, request-size limits, and appropriate rate limits.
+
+---
+
+# 11. MODULE 6: CENTRAL POLICY ENGINE
+
+Create a configurable policy-management interface.
+
+Policy fields should include:
+- Policy name.
+- Description.
+- Enabled status.
+- Priority.
+- Applicable server.
+- Applicable tool.
+- Allowed roles.
+- Operation type.
+- Data classification.
+- Destination restrictions.
+- Risk threshold.
+- Required approval.
+- Deny conditions.
+- Remediation message.
+
+Provide example policies:
+1. Deny unauthorised financial report exports.
+2. Deny access to destructive tools for read-only users.
+3. Require approval for confidential bulk exports.
+4. Block sensitive-data transfers to unapproved destinations.
+5. Restrict tools on unapproved servers.
+6. Require review after a protected tool definition changes.
+7. Reject malformed tool arguments.
+8. Apply rate limits to repeated restricted requests.
+
+Implement deterministic policy evaluation.
+
+Define policy precedence clearly.
+
+A mandatory deny rule must not be overridden by a lower-priority allow rule or by an approval request.
+
+When a request is denied, provide an explainable reason and the policy that triggered the decision.
+
+---
+
+# 12. MODULE 7: PROMPT INJECTION & TOOL POISONING DETECTION
+
+Create a detection service for:
+- Suspicious instructions in untrusted documents.
+- Attempts to override trusted application instructions.
+- Requests to reveal secrets.
+- Suspicious instructions embedded in tool descriptions.
+- Unexpected changes to approved tool definitions.
+- Suspicious tool metadata.
+
+Return structured findings:
+- Detection category.
+- Severity.
+- Evidence summary.
+- Confidence, if an actual calibrated confidence value is available.
+- Recommended action.
+
+Use deterministic pattern-based detection for the initial prototype and optionally support a configured AI-assisted classifier.
+
+Clearly label heuristic detection as heuristic.
+
+Do not claim that prompt injection can be detected perfectly.
+
+A detection result must never replace permission checks or server-side authorisation.
+
+Treat retrieved documents and tool outputs as untrusted content.
+
+---
+
+# 13. MODULE 8: SENSITIVE DATA DETECTION & DLP
+
+Create reusable input and output inspection functions.
+
+Detect configurable patterns such as:
+- API keys.
+- Access tokens.
+- Password-like values.
+- Email addresses.
+- Phone numbers.
+- Personal identifiers.
+- Confidential internal identifiers.
+- Custom organisation-specific patterns.
+
+Use synthetic secret patterns for demonstrations.
+
+For each finding, store:
+- Data category.
+- Severity.
+- Location in the inspected content, where practical.
+- Detection timestamp.
+- Applied action.
+- Related request ID.
+
+Avoid storing the full sensitive value.
+
+Implement:
+- Detect only.
+- Redact.
+- Block.
+- Require approval.
+
+The action must follow the applicable security policy.
+
+Implement redaction for known sensitive patterns.
+
+For outgoing data transfers, enforce destination and permission policies BEFORE executing the transfer.
+
+For incoming tool responses, inspect and sanitise the response before returning it to the AI client.
+
+Do not assume that every string matching a secret pattern is a valid credential. Label heuristic detections accordingly.
+
+---
+
+# 14. MODULE 9: RISK SCORING & DECISION EXPLANATIONS
+
+Implement transparent, configurable risk scoring.
+
+Possible risk factors:
+- Tool capability.
+- User permissions.
+- Data sensitivity.
+- Destination trust.
+- Request frequency.
+- Tool-definition integrity status.
+- Relevant detection findings.
+- Recent related security events.
+
+Display:
+- Risk score.
+- Risk category.
+- Contributing factors.
+- Recommended action.
+- Final policy decision.
+
+Suggested display bands:
+- Low: 0–29.
+- Medium: 30–59.
+- High: 60–79.
+- Critical: 80–100.
+
+Treat these bands as configurable prototype defaults, not universal security standards.
+
+Use deterministic, explainable scoring initially.
+
+Risk scores must not replace hard permission checks.
+
+A request that violates a mandatory access policy must remain denied even if its numerical risk score is low.
+
+---
+
+# 15. MODULE 10: HUMAN APPROVAL CENTRE
+
+Create a dedicated approval workflow.
+
+For each approval request, display:
+- Request ID.
+- Requesting identity.
+- Server.
+- Tool.
+- Operation.
+- Relevant parameters, safely redacted.
+- Risk factors.
+- Policy reason.
+- Requested destination.
+- Creation timestamp.
+- Expiry time.
+
+Actions:
+- Approve.
+- Deny.
+
+Approval must be server-side and role-checked.
+
+Bind approval to the exact request, including the relevant arguments and destination.
+
+If arguments or destination change, invalidate the previous approval.
+
+Record:
+- Approver identity.
+- Decision.
+- Timestamp.
+- Reason.
+- Request hash.
+- Expiry or rejection status.
+
+A pending approval must not execute the protected operation.
+
+Support expiry and duplicate-approval prevention.
+
+---
+
+# 16. MODULE 11: SECURE OUTPUT VALIDATION
+
+Before a tool response is returned:
+1. Validate its expected structure.
+2. Enforce response-size limits.
+3. Detect sensitive data.
+4. Apply the configured redaction or blocking policy.
+5. Handle malformed responses safely.
+6. Avoid returning internal stack traces or secret-bearing errors.
+7. Record the outcome.
+
+Where the tool schema is known, validate the response against it.
+
+Do not automatically assume that every MCP tool exposes a formal output schema.
+
+Provide safe error messages to users and keep sensitive diagnostic details out of client-facing responses.
+
+---
+
+# 17. MODULE 12: REAL-TIME MONITORING & ANOMALY DETECTION
+
+Create a runtime monitor backed by persisted security events.
+
+Monitor:
+- Repeated denied requests.
+- Excessive request frequency.
+- Unusual tool-call sequences.
+- Repeated access to restricted tools.
+- Large simulated data-export attempts.
+- Tool-definition changes.
+- Repeated sensitive-data findings.
+
+Implement deterministic threshold-based detection initially.
+
+Allow configuration of:
+- Threshold.
+- Observation window.
+- Severity.
+- Alert action.
+
+Do not label simple threshold rules as advanced machine-learning anomaly detection.
+
+Provide event details and the reason each alert was generated.
+
+---
+
+# 18. MODULE 13: ACTION LOGGING & AUDIT TRAIL
+
+Create a structured, searchable audit system.
+
+Recommended fields:
+- Event ID.
+- Timestamp.
+- Request ID.
+- Session ID, where available.
+- Authenticated actor.
+- Server ID.
+- Tool name.
+- Operation.
+- Decision.
+- Policy ID.
+- Risk category.
+- Detection categories.
+- Approval reference.
+- Tool execution status.
+- Redaction status.
+- Outcome.
+
+Never store plaintext passwords, API keys, bearer tokens, private keys, or full confidential documents in audit logs.
+
+Sanitise exception messages before logging them.
+
+Apply role-based access to audit records.
+
+Where feasible, protect audit integrity with restricted write access, append-oriented event records, and tamper-evident integrity checks.
+
+Do not claim that an ordinary database table is inherently immutable.
+
+---
+
+# 19. MODULE 14: INCIDENT MANAGEMENT & RESPONSE
+
+Create incident management workflows.
+
+Automatically create incidents when configured conditions are met.
+
+Example triggers:
+- Repeated unauthorised access attempts.
+- Confirmed sensitive-data transfer prevention.
+- Suspicious tool-definition change.
+- Repeated policy violations.
+- High-risk tool-call patterns.
+
+Incident fields:
+- Incident ID.
+- Title.
+- Severity.
+- Status.
+- Related events.
+- Affected server.
+- Related tools.
+- First-seen timestamp.
+- Last-updated timestamp.
+- Description.
+- Recommended remediation.
+- Assigned analyst.
+
+Incident states:
+- Open.
+- Investigating.
+- Contained.
+- Resolved.
+- False Positive.
+
+Support:
+- Acknowledge incident.
+- Assign analyst.
+- Add investigation notes.
+- Mark contained.
+- Resolve with a reason.
+- View related audit events.
+
+Automated response must be limited to explicitly configured and supported defensive actions.
+
+Do not claim that an external server has been disabled unless the relevant operation actually succeeded.
+
+---
+
+# 20. MODULE 15: SUPPLY-CHAIN SECURITY SCANNER
+
+Implement an initial scanner for supported package manifests and lockfiles.
+
+Support at least the file formats that can be reliably parsed in the chosen environment, such as Node.js package.json and package-lock.json.
+
+Assess:
+- Dependency names and versions.
+- Known vulnerability information, when an authorised vulnerability source is configured.
+- Dependency-source information, where available.
+- Unexpected or suspicious package indicators.
+- Declared permissions and startup commands, where applicable.
+- Lockfile consistency, where supported.
+
+For a dependency vulnerability lookup, use a configured authoritative source or clearly label the scanner as local/static analysis if external vulnerability data is unavailable.
+
+Never invent CVE findings.
+
+If no authoritative vulnerability feed is connected, explain that the scan cannot confirm whether dependencies are free of known vulnerabilities.
+
+Show findings with severity, evidence, source and recommended remediation.
+
+---
+
+# 21. MODULE 16: MCP SECURITY TESTING LAB
+
+This is a major product component, not a minor extra page.
+
+Build a complete, interactive testing environment with:
+- Scenario library.
+- Scenario details.
+- Test configuration.
+- Run Test button.
+- Execution progress.
+- Gateway decision.
+- Tool execution evidence.
+- Data-leakage verification.
+- Audit-event verification.
+- PASS / FAIL / INCONCLUSIVE results.
+- Test history.
+- Assessment reports.
+
+Every scenario must have:
+- Unique test ID.
+- Description.
+- Preconditions.
+- Synthetic input.
+- Expected security decision.
+- Expected tool-execution outcome.
+- Expected data-handling outcome.
+- Required audit evidence.
+- Pass criteria.
+- Failure criteria.
+
+Use a sandboxed simulated MCP server and synthetic records.
+
+Do not execute destructive operations against real services.
+
+Do not run uncontrolled scans against public or third-party MCP servers.
+
+---
+
+# 22. REQUIRED ATTACK SCENARIOS
+
+Implement the following scenarios as working tests.
+
+## T01: Unauthenticated Client
+
+Attempt a protected tool call without valid authentication.
+
+Expected:
+- Request denied.
+- Protected tool not executed.
+- Security event recorded.
+
+## T02: Unauthorised Tool Invocation
+
+Use an identity without permission to call a restricted tool.
+
+Expected:
+- Request denied.
+- Tool not executed.
+- Policy reason recorded.
+
+## T03: Read-Only Identity Attempts Write
+
+Attempt an inventory update as a read-only user.
+
+Expected:
+- Request denied.
+- Inventory unchanged.
+- Audit evidence recorded.
+
+## T04: Sensitive Secret in Tool Output
+
+Return a synthetic API-key-like value from a test tool.
+
+Expected:
+- Output inspector detects the value.
+- Applicable policy redacts or blocks it.
+- Client receives only the permitted response.
+- The original secret is not stored in logs.
+
+## T05: Confidential Data Export to Unapproved Destination
+
+Attempt to export synthetic confidential records to a destination not on the approved list.
+
+Expected:
+- Destination policy evaluated before export.
+- Export denied.
+- No data reaches the simulated external destination.
+- Audit event generated.
+
+## T06: Prompt Injection in Retrieved Document
+
+Retrieve a synthetic document containing instructions to reveal secrets or invoke a restricted tool.
+
+Expected:
+- Suspicious content is flagged when the configured detector recognises it.
+- Any unauthorised follow-up tool call is denied by the independent policy engine.
+- Results distinguish detection from enforcement.
+
+## T07: Tool Definition Modification
+
+Change the description or input schema of an approved simulated tool.
+
+Expected:
+- Definition fingerprint changes.
+- Integrity event recorded.
+- Tool is marked for review or blocked according to policy.
+
+## T08: Repeated Restricted Calls
+
+Generate repeated denied requests through the test client.
+
+Expected:
+- Configured threshold is evaluated.
+- Alert or rate-limit behaviour is triggered.
+- Relevant events are correlated.
+
+## T09: Invalid Tool Arguments
+
+Send malformed arguments or an argument that violates the registered tool schema.
+
+Expected:
+- Request rejected.
+- Tool not executed.
+- Validation error safely recorded.
+
+## T10: Dependency Scan
+
+Provide a synthetic dependency manifest containing a known test fixture.
+
+Expected:
+- Scanner parses the manifest.
+- Test fixture findings are reported as fixture findings.
+- No invented real vulnerability claims.
+
+## T11: High-Risk Action Without Approval
+
+Request a simulated destructive operation that requires approval.
+
+Expected:
+- Operation remains pending or denied.
+- Protected action is not executed.
+- Valid approval is required before execution.
+
+## T12: Direct Gateway Bypass Attempt
+
+Attempt to access a protected simulated tool through an unapproved route.
+
+Expected:
+- The protected tool rejects the unauthorised request.
+- Bypass attempt is recorded.
+
+Important: If the simulation cannot independently verify direct-path enforcement, mark the result INCONCLUSIVE. Do not report a successful bypass-protection test without actual evidence.
+
+---
+
+# 23. TEST EXECUTION AND VERIFICATION ENGINE
+
+This requirement is critical.
+
+Build a backend test runner that executes predefined scenarios against the same security decision engine used by the normal simulated request workflow.
+
+For each test:
+1. Create a unique test-run ID.
+2. Load scenario configuration.
+3. Prepare the synthetic environment.
+4. Record relevant initial state.
+5. Submit the test request through the gateway.
+6. Capture the decision.
+7. Capture whether the protected tool executed.
+8. Inspect changes to synthetic data.
+9. Inspect simulated transfer records.
+10. Verify relevant audit events.
+11. Evaluate expected versus actual outcomes.
+12. Persist the test result.
+13. Update the test dashboard.
+
+Use a deterministic scenario runner for the initial version.
+
+Do not generate arbitrary destructive attack payloads or execute untrusted user-provided code.
+
+Do not treat a returned DENY value as sufficient proof that an operation did not execute.
+
+## Test status rules
+
+PASS:
+All required security expectations were verified.
+
+FAIL:
+A required security expectation was violated.
+
+INCONCLUSIVE:
+The required evidence was unavailable or could not establish the actual outcome.
+
+A test must never receive PASS simply because the UI displayed a success message.
+
+Store the expected outcome, observed outcome, verification evidence, and failure reason.
+
+---
+
+# 24. RED TEAM VS BLUE TEAM INTERFACE
+
+Create a dedicated page with two panels.
+
+## Red Team: Controlled Attack Simulation
+
+Display:
+- Scenario selection.
+- Attack category.
+- Synthetic test request.
+- Run Test button.
+- Execution history.
+- Test status.
+
+## Blue Team: Security Response
+
+Display:
+- Authentication result.
+- Policy evaluation.
+- Risk factors.
+- Gateway decision.
+- Tool execution result.
+- DLP result.
+- Audit event.
+- Related alert or incident.
+
+After each test, show a chronological execution timeline.
+
+The UI must make it easy for an evaluator to understand what was attempted, what security control acted, and whether the protected operation actually executed.
+
+---
+
+# 25. TEST REPORTS & SECURITY ASSESSMENT
+
+Generate a detailed assessment report after test execution.
+
+Include:
+- Report ID.
+- Execution timestamp.
+- Scenario ID.
+- Scenario description.
+- Preconditions.
+- Expected result.
+- Actual result.
+- Gateway decision.
+- Tool execution status.
+- Data-leakage verification.
+- Audit-event references.
+- PASS / FAIL / INCONCLUSIVE.
+- Failure explanation.
+- Recommended remediation.
+
+Support a downloadable report in an appropriate supported format.
+
+If PDF generation is unavailable, provide a clean print-friendly report page and a structured JSON export.
+
+Do not claim that the report certifies the entire application or guarantees complete security.
+
+---
+
+# 26. DATA MODEL AND PERSISTENCE
+
+Create persistent entities with appropriate relationships.
+
+At minimum, implement:
+
+## MCPServer
+- id
+- name
+- description
+- environment
+- transportType
+- connectionMode
+- trustStatus
+- approvalStatus
+- lastCheckedAt
+- createdAt
+- updatedAt
+
+## MCPTool
+- id
+- serverId
+- name
+- description
+- inputSchema
+- capabilityType
+- riskCategory
+- definitionFingerprint
+- approvalStatus
+- createdAt
+- updatedAt
+
+## SecurityPolicy
+- id
+- name
+- description
+- enabled
+- priority
+- conditions
+- decision
+- approvalRequired
+- createdBy
+- createdAt
+- updatedAt
+
+## SecurityRequest
+- id
+- requestId
+- actorId
+- serverId
+- toolId
+- operation
+- destination
+- decision
+- riskScore
+- policyIds
+- executionStatus
+- createdAt
+
+Avoid persisting raw secrets or unnecessary sensitive arguments.
+
+## SecurityEvent
+- id
+- eventId
+- requestId
+- eventType
+- severity
+- actorId
+- serverId
+- toolId
+- decision
+- policyId
+- evidenceSummary
+- createdAt
+
+## SensitiveDataFinding
+- id
+- requestId
+- category
+- severity
+- redactedPreview
+- appliedAction
+- createdAt
+
+## ApprovalRequest
+- id
+- requestId
+- requesterId
+- approverId
+- requestFingerprint
+- status
+- reason
+- expiresAt
+- decidedAt
+- createdAt
+
+## SecurityIncident
+- id
+- title
+- severity
+- status
+- relatedEventIds
+- affectedServerId
+- assignedTo
+- description
+- createdAt
+- updatedAt
+- resolvedAt
+
+## SecurityTestScenario
+- id
+- testId
+- name
+- category
+- description
+- preconditions
+- syntheticInput
+- expectedDecision
+- expectedOutcome
+- enabled
+
+## SecurityTestRun
+- id
+- testRunId
+- scenarioId
+- status
+- expectedResult
+- actualResult
+- verificationEvidence
+- failureReason
+- durationMs
+- createdAt
+- completedAt
+
+## ServerAssessment
+- id
+- serverId
+- overallStatus
+- findings
+- assessedAt
+
+Use Base44-supported entity relationships and query patterns.
+
+Enforce tenant/user isolation where appropriate.
+
+Restrict sensitive administrative entities and operations to authorised roles.
+
+Do not allow ordinary users to modify audit events, overwrite test results, or grant themselves privileges.
+
+---
+
+# 27. BACKEND FUNCTION REQUIREMENTS
+
+Create separate, maintainable backend functions where supported.
+
+Suggested functions:
+- registerMCPServer
+- inspectServer
+- discoverServerTools
+- registerDemoTools
+- evaluateSecurityRequest
+- validateToolArguments
+- evaluateSecurityPolicies
+- inspectPromptInjection
+- inspectSensitiveData
+- calculateRiskScore
+- requestHumanApproval
+- decideApproval
+- executeProtectedTool
+- inspectToolOutput
+- recordSecurityEvent
+- createSecurityIncident
+- scanDependencyManifest
+- runSecurityTest
+- verifySecurityTestOutcome
+- runRegressionSuite
+- generateSecurityReport
+
+These are logical function names; adapt naming conventions to Base44.
+
+Implement authentication, validation, error handling and role checks in every security-sensitive backend function.
+
+Never rely on the browser to determine:
+- Whether the requester is an administrator.
+- Whether an operation is allowed.
+- Whether approval is valid.
+- Whether a security test passed.
+- Whether sensitive data was successfully blocked.
+
+The backend must make and persist these decisions.
+
+---
+
+# 28. SECURITY TEST DATA
+
+Seed a synthetic enterprise environment for demonstration.
+
+Create:
+- One simulated logistics MCP server.
+- One simulated document MCP server.
+- One simulated read-only identity.
+- One simulated privileged identity.
+- One simulated security approver.
+- Several read-only tools.
+- A simulated confidential export tool.
+- A simulated destructive tool.
+- Sample public, internal, confidential, and restricted records.
+- Several default security policies.
+- The required attack test scenarios.
+
+All synthetic secrets must be clearly fictional and nonfunctional.
+
+Make the initial experience useful immediately after application setup.
+
+Seed data only through a safe, repeatable process that does not create duplicate records on every run.
+
+---
+
+# 29. PRIVACY AND SECURITY REQUIREMENTS
+
+Implement the following protections:
+
+- Server-side authorisation.
+- Least-privilege access.
+- Strict input validation.
+- Output validation.
+- Request-size limits.
+- Rate limiting where supported.
+- Safe error messages.
+- Secret redaction.
+- Role-based access to incidents and logs.
+- Safe handling of uploaded manifests.
+- File-type and file-size validation.
+- No execution of uploaded code.
+- No arbitrary shell commands from the browser.
+- No storage of plaintext credentials in audit records.
+- No unrestricted external data transfers.
+- No automatic execution of pending approval requests.
+- No trust escalation based solely on tool descriptions or AI output.
+
+For production MCP integrations, require appropriate protocol-specific authentication, transport security, server trust configuration, and authorisation.
+
+A security dashboard is not itself a security boundary.
+
+---
+
+# 30. FUNCTIONALITY AND QUALITY REQUIREMENTS
+
+Every visible interactive control must perform a meaningful action.
+
+Examples:
+- Register Server must create a persistent server record.
+- Disable Server must change its actual application state.
+- Save Policy must persist the policy.
+- Run Test must execute the backend scenario.
+- Approve must verify approver permissions and update the approval workflow.
+- Deny must persist the decision.
+- View Incident must open the correct incident details.
+- Export Report must generate a real report from persisted results.
+- Dashboard charts must use actual application records.
+
+Do not create decorative buttons that do nothing.
+
+Do not populate the dashboard with permanent fake counters.
+
+Use meaningful empty states when no records exist.
+
+Provide actionable error messages when an operation fails.
+
+---
+
+# 31. ACCEPTANCE CRITERIA
+
+The initial build is acceptable only when the following workflows work end to end.
+
+## Workflow A: Normal Request
+A permitted client requests a permitted simulated tool. The request passes the security engine, the tool executes, the response is returned, and an audit event is recorded.
+
+## Workflow B: Unauthorised Request
+A read-only identity requests a restricted write operation. The request is denied, the tool does not execute, and an audit event is recorded.
+
+## Workflow C: Sensitive Output
+A simulated tool returns a synthetic secret. The output inspection function detects it, applies the configured policy, and prevents the unredacted secret from reaching the client.
+
+## Workflow D: Approval
+A high-risk action requires approval. The operation remains unexecuted until a valid authorised approval is provided.
+
+## Workflow E: Security Test
+An evaluator runs a predefined attack scenario. The test runner executes the request, verifies actual outcomes, records evidence, and persists the result.
+
+## Workflow F: Failure Detection
+A security policy is deliberately weakened in the controlled test environment. A relevant regression test detects that the expected protection no longer works.
+
+## Workflow G: Incident Investigation
+A configured series of suspicious events creates an incident. An authorised analyst can inspect the timeline, add notes, and resolve the incident.
+
+## Workflow H: Reporting
+An evaluator can view previous test results and generate a report based on real persisted records.
+
+---
+
+# 32. IMPLEMENTATION STRATEGY
+
+Build the whole product in one coordinated implementation effort, but validate it incrementally.
+
+Priority 1:
+- Application shell.
+- Authentication and roles.
+- Data entities.
+- Synthetic MCP environment.
+- Runtime security engine.
+- Policy enforcement.
+- DLP.
+- Audit logging.
+
+Priority 2:
+- Security dashboard.
+- Approval workflow.
+- Monitoring.
+- Incident management.
+- Server and tool inventory.
+
+Priority 3:
+- Attack simulation library.
+- Verification engine.
+- Regression testing.
+- Security reports.
+
+Priority 4:
+- Prompt-injection detection.
+- Tool-definition integrity.
+- Dependency scanning.
+- Additional advanced controls.
+
+Do not stop after generating the first visual dashboard.
+
+Continue integrating the modules, connecting all workflows, testing the application, and correcting broken interactions.
+
+If the platform imposes a genuine technical limitation, preserve the architecture and clearly document the limitation instead of silently omitting the feature.
+
+---
+
+# 33. FINAL INSTRUCTION
+
+Build SENTINEL-MCP as a coherent, polished, interactive and security-focused application.
+
+The most important demonstration is:
+
+1. A simulated AI client requests access to confidential financial data.
+2. The gateway authenticates the client.
+3. The policy engine evaluates permissions and destination restrictions.
+4. The request is denied before an unauthorised export executes.
+5. An audit event is recorded.
+6. The Security Testing Lab runs the corresponding attack scenario.
+7. The verification engine confirms that the protected action did not execute.
+8. The test result appears in the dashboard with evidence.
+9. The evaluator can inspect the relevant policy, event and test report.
+
+Make this end-to-end workflow reliable before spending excessive effort on decorative features.
+
+The final product should communicate three things clearly:
+
+**PROTECT:** Enforce security controls at the point of tool execution.
+
+**DETECT:** Identify suspicious requests, sensitive data, and unsafe configurations.
+
+**PROVE:** Test and verify security outcomes using repeatable, evidence-backed scenarios.
+
+Start implementing the application now.
