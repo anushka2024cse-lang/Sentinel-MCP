@@ -33,6 +33,10 @@ export const ToolInventory: React.FC<ToolInventoryProps> = ({
   const [filterCapability, setFilterCapability] = useState<string>('ALL');
   const [selectedTool, setSelectedTool] = useState<MCPTool | null>(null);
   const [tamperingId, setTamperingId] = useState<string | null>(null);
+  const [toolToApprove, setToolToApprove] = useState<MCPTool | null>(null);
+  const [approvalCapability, setApprovalCapability] = useState<MCPTool['capabilityType']>('Read');
+  const [approvalRoles, setApprovalRoles] = useState<UserRole[]>(['Administrator']);
+  const [approvalRequired, setApprovalRequired] = useState(true);
 
   const isAdmin = currentRole === 'Administrator';
 
@@ -64,6 +68,30 @@ export const ToolInventory: React.FC<ToolInventoryProps> = ({
     } finally {
       setTamperingId(null);
     }
+  };
+
+  const handleApproveMcpTool = async () => {
+    if (!toolToApprove || approvalRoles.length === 0) return;
+    setTamperingId(toolToApprove.id);
+    try {
+      await api.approveMcpTool(toolToApprove.id, {
+        capabilityType: approvalCapability,
+        allowedRoles: approvalRoles,
+        approvalRequirements: approvalRequired
+      });
+      setToolToApprove(null);
+      onRefresh();
+    } catch (err: any) {
+      alert(`Tool approval failed: ${err.message}`);
+    } finally {
+      setTamperingId(null);
+    }
+  };
+
+  const toggleApprovalRole = (role: UserRole) => {
+    setApprovalRoles(current => current.includes(role)
+      ? current.filter(value => value !== role)
+      : [...current, role]);
   };
 
   return (
@@ -156,7 +184,7 @@ export const ToolInventory: React.FC<ToolInventoryProps> = ({
                   {isTampered ? (
                     <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded font-bold bg-red-950 text-red-400 border border-red-800 flex items-center gap-1 animate-pulse">
                       <AlertTriangle className="w-3 h-3" />
-                      TAMPERED FINGERPRINT
+                      {tool.definitionFingerprint === 'tampered_hash_deadbeef' ? 'TAMPERED FINGERPRINT' : 'UNAPPROVED / REVIEW REQUIRED'}
                     </span>
                   ) : (
                     <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded font-bold bg-emerald-950 text-emerald-400 border border-emerald-800 flex items-center gap-1">
@@ -203,7 +231,21 @@ export const ToolInventory: React.FC<ToolInventoryProps> = ({
 
                 {isAdmin && (
                   <div className="flex items-center gap-2">
-                    {isTampered ? (
+                    {server?.connectionMode === 'live_mcp_proxy' && tool.approvalStatus !== 'approved' ? (
+                      <button
+                        onClick={() => {
+                          setToolToApprove(tool);
+                          setApprovalCapability('Read');
+                          setApprovalRoles(['Administrator']);
+                          setApprovalRequired(true);
+                        }}
+                        disabled={tamperingId === tool.id || server.trustStatus !== 'trusted' || server.approvalStatus !== 'approved'}
+                        className="px-2.5 py-1 text-[11px] font-semibold rounded bg-blue-950/40 text-blue-200 border border-blue-700 hover:bg-blue-900/40 disabled:opacity-50"
+                        title="Review this discovered MCP definition and set its approved baseline"
+                      >
+                        Review &amp; approve definition
+                      </button>
+                    ) : isTampered ? (
                       <button
                         onClick={() => handleRestoreTool(tool.id)}
                         disabled={tamperingId === tool.id}
@@ -260,6 +302,66 @@ export const ToolInventory: React.FC<ToolInventoryProps> = ({
                 className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold cursor-pointer"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {toolToApprove && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="bg-[#0F172A] border border-slate-700 rounded-xl max-w-lg w-full p-6 space-y-4">
+            <div className="border-b border-slate-800 pb-3">
+              <h2 className="text-base font-bold text-slate-100">Approve discovered MCP definition</h2>
+              <p className="mt-1 text-xs text-slate-400">
+                {toolToApprove.name} · the current server definition becomes the fingerprint baseline.
+              </p>
+            </div>
+            <label className="block text-xs text-slate-300">
+              Capability classification
+              <select
+                value={approvalCapability}
+                onChange={event => setApprovalCapability(event.target.value as MCPTool['capabilityType'])}
+                className="mt-1 w-full bg-[#111C30] border border-slate-700 rounded-lg p-2 text-slate-200"
+              >
+                <option value="Read">Read</option>
+                <option value="Write">Write</option>
+                <option value="Export">Export</option>
+                <option value="Destructive">Destructive</option>
+                <option value="Administrative">Administrative</option>
+              </select>
+            </label>
+            <fieldset className="space-y-2">
+              <legend className="text-xs text-slate-300">Allowed roles</legend>
+              {(['Administrator', 'Security Analyst', 'Approver', 'Read-only Auditor'] as const).map(role => (
+                <label key={role} className="flex items-center gap-2 text-xs text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={approvalRoles.includes(role)}
+                    onChange={() => toggleApprovalRole(role)}
+                  />
+                  {role}
+                </label>
+              ))}
+            </fieldset>
+            <label className="flex items-center gap-2 text-xs text-amber-200">
+              <input
+                type="checkbox"
+                checked={approvalRequired}
+                onChange={event => setApprovalRequired(event.target.checked)}
+              />
+              Require human approval for each invocation
+            </label>
+            <div className="flex justify-end gap-2 border-t border-slate-800 pt-3">
+              <button onClick={() => setToolToApprove(null)} className="px-3 py-2 text-xs text-slate-300">
+                Cancel
+              </button>
+              <button
+                onClick={handleApproveMcpTool}
+                disabled={tamperingId === toolToApprove.id || approvalRoles.length === 0}
+                className="px-3 py-2 text-xs font-semibold rounded bg-blue-600 text-white disabled:opacity-50"
+              >
+                Approve fingerprint
               </button>
             </div>
           </div>

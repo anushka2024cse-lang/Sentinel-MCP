@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Header } from './components/Header.js';
+import { AuthenticationGate } from './components/AuthenticationGate.js';
 import { Sidebar, NavPage } from './components/Sidebar.js';
 import { PrimaryDemoModal } from './components/PrimaryDemoModal.js';
 import { OverviewDashboard } from './views/OverviewDashboard.js';
@@ -18,9 +19,8 @@ import { SecurityTestingLab } from './views/SecurityTestingLab.js';
 import { TestResultsReports } from './views/TestResultsReports.js';
 import { SettingsView } from './views/SettingsView.js';
 import { api } from './services/api.js';
+import type { ApiSession } from './services/api.js';
 import {
-  UserRole,
-  IdentityProfile,
   MCPServer,
   MCPTool,
   SecurityPolicy,
@@ -35,9 +35,17 @@ import {
 } from './types/index.js';
 
 export default function App() {
+  return (
+    <AuthenticationGate>
+      {(session, onLogout) => <DashboardApp session={session} onLogout={onLogout} />}
+    </AuthenticationGate>
+  );
+}
+
+function DashboardApp({ session, onLogout }: { session: ApiSession; onLogout: () => void }) {
   const [currentPage, setCurrentPage] = useState<NavPage>('dashboard');
-  const [currentRole, setCurrentRole] = useState<UserRole>('Administrator');
-  const [currentIdentityId, setCurrentIdentityId] = useState<string>('user-admin');
+  const currentRole = session.role;
+  const currentIdentityId = session.subject;
 
   // Core Data State
   const [stats, setStats] = useState<SystemStats | null>(null);
@@ -51,7 +59,6 @@ export default function App() {
   const [incidents, setIncidents] = useState<SecurityIncident[]>([]);
   const [scenarios, setScenarios] = useState<SecurityTestScenario[]>([]);
   const [testRuns, setTestRuns] = useState<SecurityTestRun[]>([]);
-  const [identities, setIdentities] = useState<IdentityProfile[]>([]);
 
   // Navigation & Modals
   const [selectedServerForTools, setSelectedServerForTools] = useState<string | undefined>();
@@ -72,8 +79,7 @@ export default function App() {
         approvalsData,
         incidentsData,
         scenariosData,
-        runsData,
-        identitiesData
+        runsData
       ] = await Promise.all([
         api.getStats(),
         api.getServers(),
@@ -85,8 +91,7 @@ export default function App() {
         api.getApprovals(),
         api.getIncidents(),
         api.getScenarios(),
-        api.getTestRuns(),
-        api.getIdentities()
+        api.getTestRuns()
       ]);
 
       setStats(statsData);
@@ -100,7 +105,6 @@ export default function App() {
       setIncidents(incidentsData);
       setScenarios(scenariosData);
       setTestRuns(runsData);
-      setIdentities(identitiesData);
     } catch (err) {
       console.error('Failed to load Sentinel state:', err);
     } finally {
@@ -114,22 +118,6 @@ export default function App() {
     const interval = setInterval(loadData, 6000);
     return () => clearInterval(interval);
   }, [loadData]);
-
-  const handleRoleChange = (role: UserRole) => {
-    setCurrentRole(role);
-    const matchingIdentity = identities.find(i => i.role === role);
-    if (matchingIdentity) {
-      setCurrentIdentityId(matchingIdentity.id);
-    }
-  };
-
-  const handleIdentityChange = (id: string) => {
-    setCurrentIdentityId(id);
-    const ident = identities.find(i => i.id === id);
-    if (ident) {
-      setCurrentRole(ident.role);
-    }
-  };
 
   const handleResetSandbox = async () => {
     if (!confirm('Reset synthetic MCP sandbox and database to default baseline?')) return;
@@ -152,10 +140,8 @@ export default function App() {
       {/* Top Application Header */}
       <Header
         currentRole={currentRole}
-        onRoleChange={handleRoleChange}
-        identities={identities}
         currentIdentityId={currentIdentityId}
-        onIdentityChange={handleIdentityChange}
+        onLogout={onLogout}
         onRunPrimaryDemo={() => setIsDemoModalOpen(true)}
         onResetDemo={handleResetSandbox}
         isResetting={isResetting}
@@ -212,10 +198,8 @@ export default function App() {
 
             {currentPage === 'access' && (
               <IdentityAccess
-                identities={identities}
                 tools={tools}
                 currentRole={currentRole}
-                onRefresh={loadData}
               />
             )}
 
@@ -233,7 +217,6 @@ export default function App() {
               <RuntimeMonitor
                 servers={servers}
                 tools={tools}
-                identities={identities}
                 currentRole={currentRole}
                 recentRequests={requests}
                 onRefresh={loadData}
@@ -252,6 +235,7 @@ export default function App() {
               <ApprovalCentre
                 approvals={approvals}
                 currentRole={currentRole}
+                currentIdentityId={currentIdentityId}
                 onRefresh={loadData}
               />
             )}

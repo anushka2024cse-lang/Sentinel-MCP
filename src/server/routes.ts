@@ -1,11 +1,42 @@
 import express, { Request, Response, Router } from 'express';
 import crypto from 'crypto';
 import { storage, computeFingerprint } from './storage.js';
-import { SecurityGatewayEngine } from './engine.js';
+import { ApprovalWorkflowError, SecurityGatewayEngine } from './engine.js';
 import { SecurityTestRunner } from './testRunner.js';
-import { MCPServer, SecurityPolicy, UserRole } from '../types/index.js';
+import {
+  createAuthenticationMiddleware,
+  createAuthorizationMiddleware,
+  hasConfiguredPrincipal,
+  loadApiTokenConfig,
+  requirePrincipal
+} from './auth.js';
+import { initializeApprovalEncryptionKey } from './approvalCrypto.js';
+import { MCPServer, SecurityEvent, SecurityIncident, SecurityPolicy, UserRole } from '../types/index.js';
+import {
+  computeMcpToolFingerprint,
+  discoverMcpTools,
+  McpConnectionError,
+  validateMcpEndpoint
+} from './mcpClient.js';
 
 export const apiRouter = Router();
+
+const apiTokenConfig = loadApiTokenConfig(process.env);
+initializeApprovalEncryptionKey();
+
+function publicApproval(approval: NonNullable<ReturnType<typeof storage.getApprovalById>>) {
+  const { encryptedArguments: _encryptedArguments, ...safeApproval } = approval;
+  return safeApproval;
+}
+
+apiRouter.use(
+  createAuthenticationMiddleware(apiTokenConfig),
+  createAuthorizationMiddleware()
+);
+
+apiRouter.get('/auth/session', (req: Request, res: Response) => {
+  res.json(requirePrincipal(req));
+});
 
 // 1. Stats
 apiRouter.get('/stats', (_req: Request, res: Response) => {
@@ -23,9 +54,26 @@ apiRouter.get('/servers', (_req: Request, res: Response) => {
 });
 
 apiRouter.post('/servers', (req: Request, res: Response) => {
-  const { name, description, environment, transportType, endpointUrl } = req.body;
-  if (!name || !transportType) {
-    return res.status(400).json({ error: 'Server name and transportType are required' });
+  const { name, description, environment, transportType, endpointUrl, connectionMode } = req.body;
+  if (
+    typeof name !== 'string' || name.trim().length === 0 || name.length > 128 ||
+    !['stdio', 'sse', 'stream', 'websocket', 'synthetic'].includes(transportType) ||
+    typeof description !== 'undefined' && (typeof description !== 'string' || description.length > 1000) ||
+    typeof environment !== 'undefined' && !['production', 'staging', 'sandbox', 'development'].includes(environment) ||
+    typeof connectionMode !== 'undefined' && !['simulated_adapter', 'live_mcp_proxy'].includes(connectionMode)
+  ) {
+    return res.status(400).json({ error: 'Server name, transport, or configuration is invalid.' });
+  }
+  const isLiveMcp = connectionMode === 'live_mcp_proxy';
+  if (isLiveMcp && (transportType !== 'stream' || typeof endpointUrl !== 'string')) {
+    return res.status(400).json({ error: 'Live MCP servers require Streamable HTTP transport and an endpoint URL.' });
+  }
+  if (isLiveMcp) {
+    try {
+      validateMcpEndpoint(endpointUrl);
+    } catch (error) {
+      return res.status(400).json({ error: error instanceof Error ? error.message : 'MCP endpoint configuration is invalid.' });
+    }
   }
   const now = new Date().toISOString();
   const newServer: MCPServer = {
@@ -34,17 +82,62 @@ apiRouter.post('/servers', (req: Request, res: Response) => {
     description: description || 'Registered custom MCP server',
     environment: environment || 'sandbox',
     transportType,
-    connectionMode: 'simulated_adapter',
+    connectionMode: isLiveMcp ? 'live_mcp_proxy' : 'simulated_adapter',
     trustStatus: 'untrusted',
     approvalStatus: 'unapproved',
     endpointUrl: endpointUrl || `mcp://${name.toLowerCase().replace(/\s+/g, '-')}.local`,
-    isSimulated: true,
+    isSimulated: !isLiveMcp,
     lastCheckedAt: now,
     createdAt: now,
     updatedAt: now
   };
   storage.addServer(newServer);
   res.status(201).json(newServer);
+});
+
+apiRouter.post('/servers/:id/discover', async (req: Request, res: Response) => {
+  const server = storage.getServerById(req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found.' });
+  if (server.connectionMode !== 'live_mcp_proxy') {
+    return res.status(409).json({ error: 'Tool discovery requires a live MCP server configuration.' });
+  }
+  try {
+    const principal = requirePrincipal(req);
+    const discovered = await discoverMcpTools(server);
+    const event: SecurityEvent = {
+      id: `evt-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+      eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
+      requestId: `tool-discovery:${server.id}`,
+      eventType: 'REQUEST_EVALUATED',
+      severity: 'Low',
+      actorId: principal.subject,
+      serverId: server.id,
+      toolName: 'tools/list',
+      decision: 'ALLOW',
+      evidenceSummary: `MCP tool discovery completed; ${discovered.length} definitions were recorded for explicit review.`,
+      createdAt: new Date().toISOString()
+    };
+    const tools = storage.syncDiscoveredTools(server.id, discovered, event);
+    const updatedServer = storage.getServerById(server.id);
+    if (!updatedServer) throw new Error('MCP server disappeared during tool discovery.');
+    return res.json({
+      server: updatedServer,
+      tools: tools.map(tool => ({
+        id: tool.id,
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        approvalStatus: tool.approvalStatus,
+        definitionFingerprint: tool.definitionFingerprint
+      }))
+    });
+  } catch (error) {
+    if (error instanceof McpConnectionError) {
+      return res.status(502).json({ error: error.message });
+    }
+    console.error('[SENTINEL-MCP] MCP tool discovery failed:', error);
+    return res.status(500).json({ error: 'MCP tool discovery failed; no new tool definitions were committed.' });
+  }
 });
 
 apiRouter.post('/servers/:id/toggle-trust', (req: Request, res: Response) => {
@@ -76,6 +169,9 @@ apiRouter.post('/tools/:id/tamper', (req: Request, res: Response) => {
   const { id } = req.params;
   const tool = storage.getToolById(id);
   if (!tool) return res.status(404).json({ error: 'Tool not found' });
+  if (storage.getServerById(tool.serverId)?.connectionMode === 'live_mcp_proxy') {
+    return res.status(409).json({ error: 'The simulated tamper control cannot modify a live MCP tool definition.' });
+  }
 
   // Intentionally modify description and corrupt fingerprint to test T07 integrity detection
   const tampered = storage.updateTool(id, {
@@ -90,6 +186,9 @@ apiRouter.post('/tools/:id/restore', (req: Request, res: Response) => {
   const { id } = req.params;
   const tool = storage.getToolById(id);
   if (!tool) return res.status(404).json({ error: 'Tool not found' });
+  if (storage.getServerById(tool.serverId)?.connectionMode === 'live_mcp_proxy') {
+    return res.status(409).json({ error: 'Live MCP definition changes require discovery and explicit fingerprint reapproval.' });
+  }
 
   const cleanDescription = tool.description.replace(/ \[UNAUTHORIZED OVERRIDE:.*\]/, '');
   const cleanFingerprint = computeFingerprint({
@@ -103,6 +202,61 @@ apiRouter.post('/tools/:id/restore', (req: Request, res: Response) => {
     approvalStatus: 'approved'
   });
   res.json(restored);
+});
+
+apiRouter.post('/tools/:id/approve', (req: Request, res: Response) => {
+  const { capabilityType, allowedRoles, approvalRequirements } = req.body;
+  const tool = storage.getToolById(req.params.id);
+  if (!tool) return res.status(404).json({ error: 'Tool not found.' });
+  const server = storage.getServerById(tool.serverId);
+  if (!server || server.connectionMode !== 'live_mcp_proxy') {
+    return res.status(409).json({ error: 'Only discovered live MCP tools can be approved through this workflow.' });
+  }
+  if (server.trustStatus !== 'trusted' || server.approvalStatus !== 'approved') {
+    return res.status(409).json({ error: 'Trust and approve the MCP server before approving its tools.' });
+  }
+  const validRoles: UserRole[] = ['Administrator', 'Security Analyst', 'Approver', 'Read-only Auditor'];
+  if (
+    !['Read', 'Write', 'Export', 'Destructive', 'Administrative'].includes(capabilityType) ||
+    !Array.isArray(allowedRoles) ||
+    allowedRoles.length === 0 ||
+    allowedRoles.some((role: unknown) => !validRoles.includes(role as UserRole)) ||
+    new Set(allowedRoles).size !== allowedRoles.length ||
+    typeof approvalRequirements !== 'boolean'
+  ) {
+    return res.status(400).json({ error: 'Provide a valid capabilityType, non-empty unique allowedRoles, and approvalRequirements boolean.' });
+  }
+  const principal = requirePrincipal(req);
+  const now = new Date().toISOString();
+  const approved = storage.approveTool(
+    tool.id,
+    {
+      capabilityType,
+      allowedRoles,
+      approvalRequirements,
+      definitionFingerprint: computeMcpToolFingerprint({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema
+      }),
+      approvalStatus: 'approved'
+    },
+    {
+      id: `evt-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+      eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
+      requestId: `tool-approval:${tool.id}`,
+      eventType: 'REQUEST_EVALUATED',
+      severity: 'Medium',
+      actorId: principal.subject,
+      serverId: server.id,
+      toolName: tool.name,
+      decision: 'ALLOW',
+      evidenceSummary: `Administrator ${principal.subject} approved the discovered tool definition ${tool.id}.`,
+      createdAt: now
+    }
+  );
+  if (!approved) return res.status(404).json({ error: 'Tool not found.' });
+  return res.json(approved);
 });
 
 // 4. Policies
@@ -126,7 +280,7 @@ apiRouter.post('/policies', (req: Request, res: Response) => {
     approvalRequired: Boolean(approvalRequired),
     remediationMessage: remediationMessage || 'Action blocked by policy.',
     allowedDestinations: allowedDestinations || [],
-    createdBy: 'SecOps Administrator',
+    createdBy: requirePrincipal(req).subject,
     createdAt: now,
     updatedAt: now
   };
@@ -153,10 +307,10 @@ apiRouter.post('/policies/:id/toggle', (req: Request, res: Response) => {
 // 5. Central Runtime Gateway Endpoint
 apiRouter.post('/gateway/evaluate', async (req: Request, res: Response) => {
   try {
-    const { actorId, actorRole, serverId, toolName, arguments: args, destination, bypassGateway, tamperToolSchema } = req.body;
+    const { serverId, toolName, arguments: args, destination, bypassGateway, tamperToolSchema } = req.body;
+    const principal = requirePrincipal(req);
     const result = await SecurityGatewayEngine.evaluateRequest({
-      actorId,
-      actorRole,
+      principal,
       serverId,
       toolName,
       arguments: args || {},
@@ -165,60 +319,57 @@ apiRouter.post('/gateway/evaluate', async (req: Request, res: Response) => {
       tamperToolSchema
     });
     res.json(result);
-  } catch (error: any) {
-    console.error('Gateway evaluation error:', error);
+  } catch (error: unknown) {
+    console.error('[SENTINEL-MCP] Gateway evaluation failed:', error);
     res.status(500).json({
-      decision: 'DENY',
-      executionStatus: 'blocked',
-      remediationReason: 'Internal Gateway Error: Defaulting to DENY per security fail-closed policy.',
-      error: error.message
+      error: 'Gateway evaluation failed; the operation outcome could not be confirmed.'
     });
   }
 });
 
 // 6. Approvals
 apiRouter.get('/approvals', (_req: Request, res: Response) => {
-  res.json(storage.getApprovals());
+  res.json(storage.getApprovals().map(publicApproval));
 });
 
-apiRouter.post('/approvals/:id/decide', (req: Request, res: Response) => {
+apiRouter.get('/approvals/:id', (req: Request, res: Response) => {
+  const approval = storage.getApprovalById(req.params.id);
+  if (!approval) return res.status(404).json({ error: 'Approval request not found.' });
+  return res.json(publicApproval(approval));
+});
+
+apiRouter.post('/approvals/:id/decide', async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { decision, approverId, approverRole, reason } = req.body;
-
-  if (approverRole !== 'Administrator' && approverRole !== 'Approver') {
-    return res.status(403).json({ error: 'Only Administrators and Approvers are authorized to decide approval tickets.' });
+  const { decision, reason } = req.body;
+  const principal = requirePrincipal(req);
+  if (decision !== 'APPROVED' && decision !== 'DENIED') {
+    return res.status(400).json({ error: 'decision must be APPROVED or DENIED.' });
+  }
+  if (typeof reason !== 'undefined' && (typeof reason !== 'string' || reason.length > 1000)) {
+    return res.status(400).json({ error: 'reason must be a string of at most 1000 characters.' });
   }
 
-  const approval = storage.getApprovals().find(a => a.id === id);
-  if (!approval) return res.status(404).json({ error: 'Approval request not found' });
-  if (approval.status !== 'PENDING') {
-    return res.status(400).json({ error: `Approval is already resolved as ${approval.status}` });
+  try {
+    const approval = storage.getApprovalById(id);
+    const requesterCredentialIsActive = approval
+      ? hasConfiguredPrincipal(apiTokenConfig, approval.requesterId, approval.requesterRole)
+      : false;
+    const updated = decision === 'APPROVED'
+      ? SecurityGatewayEngine.approveAndExecute(
+          id,
+          principal,
+          reason,
+          requesterCredentialIsActive
+        )
+      : SecurityGatewayEngine.denyApproval(id, principal, reason);
+    res.json(publicApproval(await updated));
+  } catch (error) {
+    if (error instanceof ApprovalWorkflowError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    console.error('[SENTINEL-MCP] Approval workflow failed:', error);
+    return res.status(500).json({ error: 'Approval could not be safely completed.' });
   }
-
-  const now = new Date().toISOString();
-  const updated = storage.updateApproval(id, {
-    status: decision === 'APPROVED' ? 'APPROVED' : 'DENIED',
-    approverId: approverId || 'sarah.connor@corp.internal',
-    approverReason: reason || (decision === 'APPROVED' ? 'Approved after identity review' : 'Rejected by security policy'),
-    decidedAt: now
-  });
-
-  // Record audit event
-  storage.addEvent({
-    id: `evt-${Date.now()}`,
-    eventId: `EVT-${Math.floor(1000 + Math.random() * 9000)}`,
-    requestId: approval.requestId,
-    eventType: 'REQUEST_EVALUATED',
-    severity: decision === 'APPROVED' ? 'Low' : 'Medium',
-    actorId: approverId || 'approver',
-    serverId: approval.serverId,
-    toolName: approval.toolName,
-    decision: decision === 'APPROVED' ? 'ALLOW' : 'DENY',
-    evidenceSummary: `Human approval ticket ${id} resolved as ${decision}. Reason: ${reason || 'N/A'}.`,
-    createdAt: now
-  });
-
-  res.json(updated);
 });
 
 // 7. Incidents
@@ -227,17 +378,49 @@ apiRouter.get('/incidents', (_req: Request, res: Response) => {
 });
 
 apiRouter.post('/incidents', (req: Request, res: Response) => {
-  const { title, severity, description, affectedServerId, assignedTo, recommendedRemediation } = req.body;
+  const {
+    title,
+    severity,
+    description,
+    affectedServerId,
+    assignedTo,
+    recommendedRemediation,
+    relatedToolNames,
+    relatedEventIds
+  } = req.body;
+  if (
+    typeof title !== 'undefined' && (typeof title !== 'string' || title.trim().length < 1 || title.length > 200) ||
+    typeof description !== 'undefined' && (typeof description !== 'string' || description.length > 4000) ||
+    typeof affectedServerId !== 'undefined' && typeof affectedServerId !== 'string' ||
+    typeof assignedTo !== 'undefined' && (typeof assignedTo !== 'string' || assignedTo.length > 128) ||
+    typeof recommendedRemediation !== 'undefined' && (typeof recommendedRemediation !== 'string' || recommendedRemediation.length > 1000) ||
+    typeof relatedToolNames !== 'undefined' && (!Array.isArray(relatedToolNames) || relatedToolNames.some(name => typeof name !== 'string')) ||
+    typeof relatedEventIds !== 'undefined' && (!Array.isArray(relatedEventIds) || relatedEventIds.some(eventId => typeof eventId !== 'string'))
+  ) {
+    return res.status(400).json({ error: 'Incident fields contain invalid values or exceed allowed lengths.' });
+  }
+  if (severity && !['Low', 'Medium', 'High', 'Critical'].includes(severity)) {
+    return res.status(400).json({ error: 'severity must be Low, Medium, High, or Critical.' });
+  }
+  const serverId = affectedServerId || 'srv-demo-enterprise';
+  const server = storage.getServerById(serverId);
+  if (!server) return res.status(400).json({ error: 'affectedServerId must identify a registered server.' });
+  if (relatedToolNames?.some((toolName: string) => !storage.getToolByName(server.id, toolName))) {
+    return res.status(400).json({ error: 'relatedToolNames must reference tools registered to the affected server.' });
+  }
+  if (relatedEventIds?.some((eventId: string) => !storage.getEvents().some(event => event.id === eventId))) {
+    return res.status(400).json({ error: 'relatedEventIds must reference existing audit events.' });
+  }
   const now = new Date().toISOString();
-  const newInc = {
-    id: `inc-${Date.now()}`,
+  const newInc: SecurityIncident = {
+    id: `inc-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
     title: title || 'Security Incident',
     severity: severity || 'Medium',
     status: 'Open' as const,
-    relatedEventIds: [],
-    affectedServerId: affectedServerId || 'srv-demo-enterprise',
-    relatedToolNames: [],
-    assignedTo: assignedTo || 'Marcus Vance (SOC Analyst)',
+    relatedEventIds: relatedEventIds || [],
+    affectedServerId: server.id,
+    relatedToolNames: relatedToolNames || [],
+    assignedTo,
     description: description || '',
     recommendedRemediation: recommendedRemediation || 'Investigate source IP and revoke active session.',
     investigationNotes: [],
@@ -248,31 +431,221 @@ apiRouter.post('/incidents', (req: Request, res: Response) => {
   res.status(201).json(newInc);
 });
 
+apiRouter.get('/incidents/:id', (req: Request, res: Response) => {
+  const incident = storage.getIncidentById(req.params.id);
+  if (!incident) return res.status(404).json({ error: 'Incident not found.' });
+
+  const allEvents = storage.getEvents();
+  const directlyRelatedEvents = allEvents.filter(event =>
+    incident.relatedEventIds.includes(event.id)
+  );
+  const relatedRequestIds = new Set(directlyRelatedEvents.map(event => event.requestId));
+  const relatedRequests = storage.getRequests().filter(request =>
+    relatedRequestIds.has(request.requestId) ||
+    request.serverId === incident.affectedServerId &&
+      incident.relatedToolNames.includes(request.toolName)
+  );
+  const requestIds = new Set(relatedRequests.map(request => request.requestId));
+  const relatedEvents = allEvents.filter(event =>
+    incident.relatedEventIds.includes(event.id) ||
+    requestIds.has(event.requestId) ||
+    event.requestId === incident.id
+  );
+  const policies = storage.getPolicies();
+  const relatedPolicies = [...new Set(relatedRequests.flatMap(request => request.policyIds))]
+    .map(id => policies.find(policy => policy.id === id))
+    .filter((policy): policy is SecurityPolicy => Boolean(policy))
+    .map(({ id, name, description, enabled, updatedAt }) => ({ id, name, description, enabled, updatedAt }));
+
+  return res.json({
+    incident,
+    server: storage.getServerById(incident.affectedServerId) || null,
+    tools: storage.getTools().filter(tool =>
+      tool.serverId === incident.affectedServerId &&
+      incident.relatedToolNames.includes(tool.name)
+    ),
+    requests: relatedRequests.map(({ arguments: _arguments, sanitizedOutput: _output, ...request }) => request),
+    events: relatedEvents,
+    policies: relatedPolicies
+  });
+});
+
+function createIncidentEvent(
+  incident: SecurityIncident,
+  actorId: string,
+  evidenceSummary: string,
+  decision: SecurityEvent['decision'] = 'ALLOW'
+): SecurityEvent {
+  const timestamp = new Date().toISOString();
+  return {
+    id: `evt-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+    eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
+    requestId: incident.id,
+    eventType: 'INCIDENT_ACTION',
+    severity: incident.severity,
+    actorId,
+    serverId: incident.affectedServerId,
+    toolName: incident.relatedToolNames[0] || 'incident-response',
+    decision,
+    evidenceSummary,
+    createdAt: timestamp
+  };
+}
+
 apiRouter.put('/incidents/:id', (req: Request, res: Response) => {
   const { id } = req.params;
-  const { status, note, author, assignedTo } = req.body;
-  const incident = storage.getIncidents().find(i => i.id === id);
-  if (!incident) return res.status(404).json({ error: 'Incident not found' });
-
-  const notes = [...incident.investigationNotes];
-  if (note) {
-    notes.push({
-      author: author || 'Security Analyst',
-      timestamp: new Date().toISOString(),
-      note
-    });
+  const { note, assignedTo } = req.body;
+  if (
+    typeof note !== 'string' || note.trim().length === 0 || note.length > 2000 ||
+    typeof assignedTo !== 'undefined' && (typeof assignedTo !== 'string' || assignedTo.length > 128) ||
+    Object.keys(req.body).some(key => !['note', 'assignedTo'].includes(key))
+  ) {
+    return res.status(400).json({ error: 'Provide a non-empty note (up to 2000 characters) and optional assignedTo; lifecycle changes use dedicated actions.' });
   }
+  const incident = storage.getIncidentById(id);
+  if (!incident) return res.status(404).json({ error: 'Incident not found.' });
+  if (incident.status === 'Resolved' || incident.status === 'False Positive') {
+    return res.status(409).json({ error: 'Closed incidents cannot be modified.' });
+  }
+  const principal = requirePrincipal(req);
+  const timestamp = new Date().toISOString();
+  try {
+    const updated = storage.transitionIncident(
+      id,
+      incident.status,
+      {
+        assignedTo: assignedTo ?? incident.assignedTo,
+        investigationNotes: [...incident.investigationNotes, {
+          author: principal.subject,
+          timestamp,
+          note: note.trim()
+        }]
+      },
+      createIncidentEvent(incident, principal.subject, `Investigation note added to incident ${id}.`)
+    );
+    if (!updated) return res.status(409).json({ error: 'Incident changed concurrently; reload it and retry.' });
+    return res.json(updated);
+  } catch (error) {
+    console.error('[SENTINEL-MCP] Incident note persistence failed:', error);
+    return res.status(500).json({ error: 'The incident note could not be durably recorded.' });
+  }
+});
 
-  const updates: any = {
-    investigationNotes: notes,
-    updatedAt: new Date().toISOString()
-  };
-  if (status) updates.status = status;
-  if (status === 'Resolved') updates.resolvedAt = new Date().toISOString();
-  if (assignedTo) updates.assignedTo = assignedTo;
+apiRouter.post('/incidents/:id/investigate', (req: Request, res: Response) => {
+  const incident = storage.getIncidentById(req.params.id);
+  if (!incident) return res.status(404).json({ error: 'Incident not found.' });
+  if (Object.keys(req.body).some(key => key !== 'note') ||
+    typeof req.body.note !== 'string' || req.body.note.trim().length === 0 || req.body.note.length > 2000) {
+    return res.status(400).json({ error: 'A non-empty investigation note of at most 2000 characters is required.' });
+  }
+  if (incident.status !== 'Open') {
+    return res.status(409).json({ error: 'Only open incidents can transition to investigation.' });
+  }
+  const principal = requirePrincipal(req);
+  const timestamp = new Date().toISOString();
+  try {
+    const updated = storage.transitionIncident(
+      incident.id,
+      'Open',
+      {
+        status: 'Investigating',
+        investigationNotes: [...incident.investigationNotes, {
+          author: principal.subject,
+          timestamp,
+          note: req.body.note.trim()
+        }]
+      },
+      createIncidentEvent(incident, principal.subject, `Investigation started: ${req.body.note.trim()}`)
+    );
+    if (!updated) return res.status(409).json({ error: 'Incident changed concurrently; reload it and retry.' });
+    return res.json(updated);
+  } catch (error) {
+    console.error('[SENTINEL-MCP] Incident investigation persistence failed:', error);
+    return res.status(500).json({ error: 'The investigation could not be durably recorded.' });
+  }
+});
 
-  const updated = storage.updateIncident(id, updates);
-  res.json(updated);
+apiRouter.post('/incidents/:id/contain', (req: Request, res: Response) => {
+  const { reason } = req.body;
+  if (Object.keys(req.body).some(key => key !== 'reason') ||
+    typeof reason !== 'string' || reason.trim().length < 5 || reason.length > 1000) {
+    return res.status(400).json({ error: 'A containment reason of 5 to 1000 characters is required.' });
+  }
+  const incident = storage.getIncidentById(req.params.id);
+  if (!incident) return res.status(404).json({ error: 'Incident not found.' });
+  const principal = requirePrincipal(req);
+  try {
+    const updated = storage.containIncident(
+      incident.id,
+      principal.subject,
+      reason.trim(),
+      createIncidentEvent(
+        incident,
+        principal.subject,
+        `Server ${incident.affectedServerId} quarantined for incident ${incident.id}: ${reason.trim()}`,
+        'DENY'
+      )
+    );
+    if (!updated) {
+      return res.status(409).json({ error: 'Containment was not applied: incident is closed, already contained, or its affected server is unavailable.' });
+    }
+    return res.json(updated);
+  } catch (error) {
+    console.error('[SENTINEL-MCP] Incident containment persistence failed:', error);
+    return res.status(500).json({ error: 'Containment could not be durably applied; no success was reported.' });
+  }
+});
+
+apiRouter.post('/incidents/:id/resolve', (req: Request, res: Response) => {
+  const { details } = req.body;
+  if (Object.keys(req.body).some(key => key !== 'details') ||
+    typeof details !== 'string' || details.trim().length < 10 || details.length > 4000) {
+    return res.status(400).json({ error: 'Resolution details of 10 to 4000 characters are required.' });
+  }
+  const incident = storage.getIncidentById(req.params.id);
+  if (!incident) return res.status(404).json({ error: 'Incident not found.' });
+  if (!['Open', 'Investigating', 'Contained'].includes(incident.status)) {
+    return res.status(409).json({ error: 'Incident is already closed.' });
+  }
+  const principal = requirePrincipal(req);
+  const resolvedAt = new Date().toISOString();
+  try {
+    const updated = storage.transitionIncident(
+      incident.id,
+      incident.status,
+      { status: 'Resolved', resolvedAt, resolutionDetails: details.trim() },
+      createIncidentEvent(incident, principal.subject, `Incident resolved: ${details.trim()}`)
+    );
+    if (!updated) return res.status(409).json({ error: 'Incident changed concurrently; reload it and retry.' });
+    return res.json(updated);
+  } catch (error) {
+    console.error('[SENTINEL-MCP] Incident resolution persistence failed:', error);
+    return res.status(500).json({ error: 'The incident resolution could not be durably recorded.' });
+  }
+});
+
+apiRouter.post('/incidents/:id/release-containment', (req: Request, res: Response) => {
+  const { reason } = req.body;
+  if (Object.keys(req.body).some(key => key !== 'reason') ||
+    typeof reason !== 'string' || reason.trim().length < 5 || reason.length > 1000) {
+    return res.status(400).json({ error: 'A recovery reason of 5 to 1000 characters is required.' });
+  }
+  const incident = storage.getIncidentById(req.params.id);
+  if (!incident) return res.status(404).json({ error: 'Incident not found.' });
+  const principal = requirePrincipal(req);
+  try {
+    const updated = storage.releaseIncidentContainment(
+      incident.id,
+      principal.subject,
+      reason.trim(),
+      createIncidentEvent(incident, principal.subject, `Incident containment explicitly released: ${reason.trim()}`)
+    );
+    if (!updated) return res.status(409).json({ error: 'No active containment exists for this incident.' });
+    return res.json(updated);
+  } catch (error) {
+    console.error('[SENTINEL-MCP] Incident recovery persistence failed:', error);
+    return res.status(500).json({ error: 'Containment release could not be durably recorded.' });
+  }
 });
 
 // 8. Audit Trail, Requests, Findings
@@ -401,36 +774,14 @@ apiRouter.post('/scanner/scan', (req: Request, res: Response) => {
 
 // 11. Identities & Ephemeral Tokens
 apiRouter.get('/identities', (_req: Request, res: Response) => {
-  res.json(storage.getIdentities());
-});
-
-apiRouter.post('/identities/generate-token', (req: Request, res: Response) => {
-  const { identityId, durationMinutes } = req.body;
-  const identity = storage.getIdentityById(identityId);
-  if (!identity) return res.status(404).json({ error: 'Identity not found' });
-
-  const duration = durationMinutes ? Number(durationMinutes) : 60;
-  const issuedAt = new Date();
-  const expiresAt = new Date(issuedAt.getTime() + duration * 60 * 1000);
-  const token = `stnl_token_${crypto.randomBytes(12).toString('hex')}`;
-
-  const updated = storage.updateIdentity(identityId, {
-    ephemeralToken: {
-      token,
-      issuedAt: issuedAt.toISOString(),
-      expiresAt: expiresAt.toISOString()
-    }
-  });
-
-  res.json({
-    identityId,
-    token,
-    role: identity.role,
-    issuedAt: issuedAt.toISOString(),
-    expiresAt: expiresAt.toISOString(),
-    durationMinutes: duration,
-    validationNotice: 'Ephemeral token issued with cryptographically signed validity window.'
-  });
+  const identities = storage.getIdentities().map(({ id, name, email, role, isSimulated }) => ({
+    id,
+    name,
+    email,
+    role,
+    isSimulated
+  }));
+  res.json(identities);
 });
 
 // 12. Synthetic Baseline Reset

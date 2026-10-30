@@ -34,8 +34,10 @@ export const ServerInventory: React.FC<ServerInventoryProps> = ({
   const [description, setDescription] = useState('');
   const [transportType, setTransportType] = useState<'stdio' | 'sse' | 'stream' | 'websocket'>('stdio');
   const [environment, setEnvironment] = useState<'production' | 'staging' | 'sandbox'>('production');
+  const [connectionMode, setConnectionMode] = useState<'simulated_adapter' | 'live_mcp_proxy'>('simulated_adapter');
   const [endpointUrl, setEndpointUrl] = useState('');
   const [search, setSearch] = useState('');
+  const [discoveringId, setDiscoveringId] = useState<string | null>(null);
 
   const isAdmin = currentRole === 'Administrator';
 
@@ -47,9 +49,11 @@ export const ServerInventory: React.FC<ServerInventoryProps> = ({
       await api.registerServer({
         name,
         description,
-        transportType,
+        transportType: connectionMode === 'live_mcp_proxy' ? 'stream' : transportType,
         environment,
-        endpointUrl
+        endpointUrl,
+        connectionMode,
+        isSimulated: connectionMode !== 'live_mcp_proxy'
       });
       setIsRegisterOpen(false);
       setName('');
@@ -57,6 +61,19 @@ export const ServerInventory: React.FC<ServerInventoryProps> = ({
       onRefresh();
     } catch (err: any) {
       alert(`Registration error: ${err.message}`);
+    }
+  };
+
+  const handleDiscoverTools = async (server: MCPServer) => {
+    setDiscoveringId(server.id);
+    try {
+      const result = await api.discoverMcpTools(server.id);
+      alert(`Discovered ${result.tools.length} tools. Each definition remains blocked until reviewed and explicitly approved.`);
+      onRefresh();
+    } catch (err: any) {
+      alert(`MCP discovery failed: ${err.message}`);
+    } finally {
+      setDiscoveringId(null);
     }
   };
 
@@ -123,7 +140,7 @@ export const ServerInventory: React.FC<ServerInventoryProps> = ({
       <div className="p-3.5 rounded-lg bg-[#0F172A] border border-slate-800 text-xs text-slate-400 flex items-start gap-2.5">
         <Radio className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
         <div>
-          <span className="font-semibold text-slate-200">Server Allowlist Enforcement:</span> Unapproved or untrusted MCP servers are barred from dispatching tool calls by default (Policy pol-001). Demonstrations connect to high-fidelity sandboxed synthetic adapters with full cryptographic verification.
+          <span className="font-semibold text-slate-200">Execution mode:</span> Simulated adapters are local fixtures. Live MCP servers use Streamable HTTP and only dispatch through the authenticated gateway after server and tool approval.
         </div>
       </div>
 
@@ -186,7 +203,9 @@ export const ServerInventory: React.FC<ServerInventoryProps> = ({
                   </div>
                   <div>
                     <span className="text-slate-400">Adapter:</span>
-                    <span className="text-slate-200 ml-1.5">Simulated</span>
+                    <span className={`ml-1.5 ${server.connectionMode === 'live_mcp_proxy' ? 'text-emerald-300' : 'text-amber-300'}`}>
+                      {server.connectionMode === 'live_mcp_proxy' ? 'Live MCP proxy' : 'Simulated'}
+                    </span>
                   </div>
                 </div>
 
@@ -207,6 +226,15 @@ export const ServerInventory: React.FC<ServerInventoryProps> = ({
 
                 {isAdmin && (
                   <div className="flex items-center gap-2">
+                    {server.connectionMode === 'live_mcp_proxy' && (
+                      <button
+                        onClick={() => handleDiscoverTools(server)}
+                        disabled={discoveringId === server.id}
+                        className="px-2.5 py-1 text-[11px] font-medium rounded border border-cyan-800 bg-cyan-950/40 text-cyan-200 hover:bg-cyan-900/40 disabled:opacity-50"
+                      >
+                        {discoveringId === server.id ? 'Discovering…' : 'Discover tools'}
+                      </button>
+                    )}
                     <button
                       onClick={() => handleToggleTrust(server.id)}
                       className={`px-2.5 py-1 text-[11px] font-medium rounded border cursor-pointer transition-colors ${
@@ -255,6 +283,24 @@ export const ServerInventory: React.FC<ServerInventoryProps> = ({
 
             <form onSubmit={handleRegister} className="space-y-4 text-xs">
               <div>
+                <label className="block text-slate-300 font-medium mb-1">Execution Mode</label>
+                <select
+                  value={connectionMode}
+                  onChange={(e) => {
+                    const mode = e.target.value as 'simulated_adapter' | 'live_mcp_proxy';
+                    setConnectionMode(mode);
+                    if (mode === 'live_mcp_proxy') setTransportType('stream');
+                  }}
+                  className="w-full bg-[#111C30] border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="simulated_adapter">Simulation adapter</option>
+                  <option value="live_mcp_proxy">Live MCP · Streamable HTTP</option>
+                </select>
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Live endpoints require HTTPS in production; development HTTP is restricted to loopback.
+                </p>
+              </div>
+              <div>
                 <label className="block text-slate-300 font-medium mb-1">Server Name</label>
                 <input
                   type="text"
@@ -285,10 +331,16 @@ export const ServerInventory: React.FC<ServerInventoryProps> = ({
                     onChange={(e) => setTransportType(e.target.value as any)}
                     className="w-full bg-[#111C30] border border-slate-700 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-blue-500"
                   >
-                    <option value="stdio">stdio (Local Subprocess)</option>
-                    <option value="sse">sse (Server-Sent Events)</option>
-                    <option value="websocket">websocket (Full-duplex WS)</option>
-                    <option value="stream">stream (Async Pipe)</option>
+                    {connectionMode === 'live_mcp_proxy' ? (
+                      <option value="stream">Streamable HTTP</option>
+                    ) : (
+                      <>
+                        <option value="stdio">stdio (Simulation)</option>
+                        <option value="sse">sse (Simulation)</option>
+                        <option value="websocket">websocket (Simulation)</option>
+                        <option value="stream">stream (Simulation)</option>
+                      </>
+                    )}
                   </select>
                 </div>
 
@@ -312,8 +364,9 @@ export const ServerInventory: React.FC<ServerInventoryProps> = ({
                   type="text"
                   value={endpointUrl}
                   onChange={(e) => setEndpointUrl(e.target.value)}
-                  placeholder="mcp://internal.corp/analytics/v1"
+                  placeholder={connectionMode === 'live_mcp_proxy' ? 'https://mcp.example.com/mcp' : 'mcp://internal.corp/analytics/v1'}
                   className="w-full bg-[#111C30] border border-slate-700 rounded-lg p-2.5 text-slate-200 font-mono focus:outline-none focus:border-blue-500"
+                  required={connectionMode === 'live_mcp_proxy'}
                 />
               </div>
 

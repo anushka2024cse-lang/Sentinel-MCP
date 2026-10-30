@@ -38,7 +38,10 @@ interface DatabaseSchema {
   };
 }
 
-const DB_FILE = path.resolve(process.cwd(), 'data', 'sentinel-db.json');
+const DB_FILE = path.resolve(
+  process.cwd(),
+  process.env.SENTINEL_DB_FILE || path.join('data', 'sentinel-db.json')
+);
 
 // Helper to compute sha256 fingerprint for tool definitions
 export function computeFingerprint(tool: { name: string; description: string; inputSchema: unknown }): string {
@@ -50,10 +53,10 @@ export function computeFingerprint(tool: { name: string; description: string; in
   return crypto.createHash('sha256').update(content).digest('hex').substring(0, 16);
 }
 
-class StorageEngine {
+export class StorageEngine {
   private data: DatabaseSchema;
 
-  constructor() {
+  constructor(private readonly dbFile = DB_FILE) {
     this.data = this.loadDatabase();
     if (this.data.servers.length === 0) {
       this.seedInitialData();
@@ -63,25 +66,25 @@ class StorageEngine {
 
   private loadDatabase(): DatabaseSchema {
     try {
-      if (fs.existsSync(DB_FILE)) {
-        const raw = fs.readFileSync(DB_FILE, 'utf-8');
+      if (fs.existsSync(this.dbFile)) {
+        const raw = fs.readFileSync(this.dbFile, 'utf-8');
         return JSON.parse(raw);
       }
     } catch (e) {
-      console.warn('Failed to read db file from disk, falling back to memory seed:', e);
+      throw new Error(`Failed to load Sentinel database at ${this.dbFile}.`, { cause: e });
     }
     return this.getEmptyDatabase();
   }
 
   private saveDatabase(): void {
+    const dir = path.dirname(this.dbFile);
+    fs.mkdirSync(dir, { recursive: true });
+    const tempFile = `${this.dbFile}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
     try {
-      const dir = path.dirname(DB_FILE);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), 'utf-8');
-    } catch (e) {
-      console.warn('Unable to persist db file to disk:', e);
+      fs.writeFileSync(tempFile, JSON.stringify(this.data, null, 2), { encoding: 'utf8', flag: 'wx' });
+      fs.renameSync(tempFile, this.dbFile);
+    } finally {
+      if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
     }
   }
 
@@ -845,15 +848,133 @@ class StorageEngine {
     return this.data.tools.find(t => t.id === id);
   }
 
-  public updateTool(id: string, updates: Partial<MCPTool>): MCPTool | null {
-    const idx = this.data.tools.findIndex(t => t.id === id);
-    if (idx === -1) return null;
-    this.data.tools[idx] = {
-      ...this.data.tools[idx],
+  public syncDiscoveredTools(
+    serverId: string,
+    discovered: Array<{
+      name: string;
+      description: string;
+      inputSchema: MCPTool['inputSchema'];
+      fingerprint: string;
+    }>,
+    event?: SecurityEvent
+  ): MCPTool[] {
+    const previousTools = structuredClone(this.data.tools);
+    const server = this.getServerById(serverId);
+    if (!server) throw new Error(`Cannot sync MCP tools for missing server ${serverId}.`);
+    const serverIndex = this.data.servers.indexOf(server);
+    const previousServer = this.data.servers[serverIndex];
+    const previousEvents = event ? [...this.data.events] : undefined;
+    const now = new Date().toISOString();
+    const discoveredNames = new Set(discovered.map(tool => tool.name));
+
+    for (const existing of this.data.tools.filter(tool => tool.serverId === serverId)) {
+      if (!discoveredNames.has(existing.name)) {
+        existing.approvalStatus = 'unapproved';
+        existing.lastObservedAt = now;
+      }
+    }
+
+    for (const observed of discovered) {
+      const existing = this.getToolByName(serverId, observed.name);
+      if (existing) {
+        const definitionMatches = existing.definitionFingerprint === observed.fingerprint;
+        Object.assign(existing, {
+          description: observed.description,
+          inputSchema: observed.inputSchema,
+          approvalStatus: definitionMatches ? existing.approvalStatus : 'unapproved',
+          lastObservedAt: now,
+          updatedAt: now
+        });
+      } else {
+        const unapprovedTool: MCPTool = {
+          id: `tool-${crypto.randomBytes(8).toString('hex')}`,
+          serverId,
+          name: observed.name,
+          description: observed.description,
+          inputSchema: observed.inputSchema,
+          capabilityType: 'Administrative',
+          riskCategory: 'Critical',
+          requiredPermissions: [],
+          allowedRoles: [],
+          approvalRequirements: true,
+          definitionFingerprint: observed.fingerprint,
+          approvalStatus: 'unapproved',
+          lastObservedAt: now,
+          createdAt: now,
+          updatedAt: now,
+          version: 1
+        };
+        this.data.tools.push(unapprovedTool);
+      }
+    }
+
+    if (event) this.data.events.unshift(event);
+    this.data.servers[serverIndex] = { ...server, lastCheckedAt: now, updatedAt: now };
+    try {
+      this.saveDatabase();
+    } catch (error) {
+      this.data.tools = previousTools;
+      this.data.servers[serverIndex] = previousServer;
+      if (previousEvents) this.data.events = previousEvents;
+      throw error;
+    }
+    return this.data.tools.filter(tool => tool.serverId === serverId);
+  }
+
+  public approveTool(
+    id: string,
+    updates: Pick<MCPTool, 'capabilityType' | 'allowedRoles' | 'approvalRequirements' | 'definitionFingerprint' | 'approvalStatus'>,
+    event: SecurityEvent
+  ): MCPTool | null {
+    const index = this.data.tools.findIndex(tool => tool.id === id);
+    if (index < 0) return null;
+    const previousTool = this.data.tools[index];
+    const previousEvents = [...this.data.events];
+    this.data.tools[index] = {
+      ...previousTool,
       ...updates,
       updatedAt: new Date().toISOString()
     };
-    this.saveDatabase();
+    this.data.events.unshift(event);
+    try {
+      this.saveDatabase();
+    } catch (error) {
+      this.data.tools[index] = previousTool;
+      this.data.events = previousEvents;
+      throw error;
+    }
+    return this.data.tools[index];
+  }
+
+  public addTool(tool: MCPTool): MCPTool {
+    if (this.getToolByName(tool.serverId, tool.name)) {
+      throw new Error(`Tool '${tool.name}' is already registered for server '${tool.serverId}'.`);
+    }
+    this.data.tools.push(tool);
+    try {
+      this.saveDatabase();
+    } catch (error) {
+      this.data.tools.pop();
+      throw error;
+    }
+    return tool;
+  }
+
+  public updateTool(id: string, updates: Partial<MCPTool>): MCPTool | null {
+    const idx = this.data.tools.findIndex(t => t.id === id);
+    if (idx === -1) return null;
+    const previousTool = this.data.tools[idx];
+    this.data.tools[idx] = {
+      ...previousTool,
+      ...updates,
+      updatedAt: new Date().toISOString()
+    };
+    try {
+      this.saveDatabase();
+    } catch (error) {
+      this.data.tools[idx] = previousTool;
+      throw error;
+    }
     return this.data.tools[idx];
   }
 
@@ -892,6 +1013,25 @@ class StorageEngine {
     return [...this.data.requests];
   }
 
+  public getRequestByRequestId(requestId: string): SecurityRequest | undefined {
+    return this.data.requests.find(request => request.requestId === requestId);
+  }
+
+  public updateRequestByRequestId(requestId: string, updates: Partial<SecurityRequest>): SecurityRequest | null {
+    const request = this.getRequestByRequestId(requestId);
+    if (!request) return null;
+    const index = this.data.requests.indexOf(request);
+    const previous = request;
+    this.data.requests[index] = { ...request, ...updates };
+    try {
+      this.saveDatabase();
+    } catch (error) {
+      this.data.requests[index] = previous;
+      throw error;
+    }
+    return this.data.requests[index];
+  }
+
   public addEvent(event: SecurityEvent): SecurityEvent {
     this.data.events.unshift(event);
     if (this.data.events.length > 1000) this.data.events.pop();
@@ -917,12 +1057,71 @@ class StorageEngine {
   // Approvals
   public addApproval(approval: ApprovalRequest): ApprovalRequest {
     this.data.approvals.unshift(approval);
-    this.saveDatabase();
+    try {
+      this.saveDatabase();
+    } catch (error) {
+      this.data.approvals.shift();
+      throw error;
+    }
     return approval;
+  }
+
+  public createPendingApproval(
+    approval: ApprovalRequest,
+    request: SecurityRequest,
+    event: SecurityEvent
+  ): void {
+    this.data.approvals.unshift(approval);
+    this.data.requests.unshift(request);
+    this.data.events.unshift(event);
+    try {
+      this.saveDatabase();
+    } catch (error) {
+      this.data.approvals.shift();
+      this.data.requests.shift();
+      this.data.events.shift();
+      throw error;
+    }
   }
 
   public getApprovals(): ApprovalRequest[] {
     return [...this.data.approvals];
+  }
+
+  public getApprovalById(id: string): ApprovalRequest | undefined {
+    return this.data.approvals.find(approval => approval.id === id);
+  }
+
+  public transitionApproval(
+    id: string,
+    expectedStatus: ApprovalRequest['status'],
+    updates: Partial<ApprovalRequest>,
+    event?: SecurityEvent,
+    requestUpdates?: Partial<SecurityRequest>
+  ): ApprovalRequest | null {
+    const index = this.data.approvals.findIndex(approval => approval.id === id);
+    if (index === -1 || this.data.approvals[index].status !== expectedStatus) return null;
+
+    const previousApproval = this.data.approvals[index];
+    const request = this.getRequestByRequestId(previousApproval.requestId);
+    const requestIndex = request ? this.data.requests.indexOf(request) : -1;
+    const previousRequest = requestIndex >= 0 ? this.data.requests[requestIndex] : undefined;
+    const previousEvents = event ? [...this.data.events] : undefined;
+    this.data.approvals[index] = { ...previousApproval, ...updates };
+    if (event) this.data.events.unshift(event);
+    if (requestIndex >= 0 && requestUpdates) {
+      this.data.requests[requestIndex] = { ...this.data.requests[requestIndex], ...requestUpdates };
+    }
+
+    try {
+      this.saveDatabase();
+    } catch (error) {
+      this.data.approvals[index] = previousApproval;
+      if (requestIndex >= 0 && previousRequest) this.data.requests[requestIndex] = previousRequest;
+      if (previousEvents) this.data.events = previousEvents;
+      throw error;
+    }
+    return this.data.approvals[index];
   }
 
   public updateApproval(id: string, updates: Partial<ApprovalRequest>): ApprovalRequest | null {
@@ -941,10 +1140,134 @@ class StorageEngine {
     return [...this.data.incidents];
   }
 
+  public getIncidentById(id: string): SecurityIncident | undefined {
+    return this.data.incidents.find(incident => incident.id === id);
+  }
+
+  public getActiveIncidentContainment(serverId: string, toolName: string): SecurityIncident | undefined {
+    return this.data.incidents.find(incident =>
+      incident.affectedServerId === serverId &&
+      incident.containment?.active === true &&
+      (incident.relatedToolNames.length === 0 || incident.relatedToolNames.includes(toolName))
+    );
+  }
+
   public addIncident(incident: SecurityIncident): SecurityIncident {
     this.data.incidents.unshift(incident);
     this.saveDatabase();
     return incident;
+  }
+
+  public transitionIncident(
+    id: string,
+    expectedStatus: SecurityIncident['status'],
+    updates: Partial<SecurityIncident>,
+    event: SecurityEvent
+  ): SecurityIncident | null {
+    const index = this.data.incidents.findIndex(incident => incident.id === id);
+    if (index < 0 || this.data.incidents[index].status !== expectedStatus) return null;
+
+    const previousIncident = this.data.incidents[index];
+    const previousEvents = [...this.data.events];
+    this.data.incidents[index] = {
+      ...previousIncident,
+      ...updates,
+      updatedAt: new Date().toISOString()
+    };
+    this.data.events.unshift(event);
+    try {
+      this.saveDatabase();
+    } catch (error) {
+      this.data.incidents[index] = previousIncident;
+      this.data.events = previousEvents;
+      throw error;
+    }
+    return this.data.incidents[index];
+  }
+
+  public containIncident(
+    id: string,
+    actorId: string,
+    reason: string,
+    event: SecurityEvent
+  ): SecurityIncident | null {
+    const index = this.data.incidents.findIndex(incident => incident.id === id);
+    if (index < 0) return null;
+    const incident = this.data.incidents[index];
+    if (incident.status !== 'Open' && incident.status !== 'Investigating') return null;
+    if (incident.containment?.active) return null;
+
+    const serverIndex = this.data.servers.findIndex(server => server.id === incident.affectedServerId);
+    if (serverIndex < 0) return null;
+    const previousIncident = incident;
+    const previousServer = this.data.servers[serverIndex];
+    const previousEvents = [...this.data.events];
+    const timestamp = new Date().toISOString();
+    this.data.servers[serverIndex] = {
+      ...previousServer,
+      trustStatus: 'quarantined',
+      approvalStatus: 'rejected',
+      updatedAt: timestamp
+    };
+    this.data.incidents[index] = {
+      ...incident,
+      status: 'Contained',
+      containment: {
+        type: 'server_quarantine',
+        active: true,
+        initiatedBy: actorId,
+        reason,
+        startedAt: timestamp
+      },
+      updatedAt: timestamp
+    };
+    this.data.events.unshift(event);
+    try {
+      this.saveDatabase();
+    } catch (error) {
+      this.data.servers[serverIndex] = previousServer;
+      this.data.incidents[index] = previousIncident;
+      this.data.events = previousEvents;
+      throw error;
+    }
+    return this.data.incidents[index];
+  }
+
+  public releaseIncidentContainment(
+    id: string,
+    actorId: string,
+    reason: string,
+    event: SecurityEvent
+  ): SecurityIncident | null {
+    const index = this.data.incidents.findIndex(incident => incident.id === id);
+    if (index < 0) return null;
+    const incident = this.data.incidents[index];
+    if (!incident.containment?.active) return null;
+
+    const previousIncident = incident;
+    const previousEvents = [...this.data.events];
+    const timestamp = new Date().toISOString();
+    this.data.incidents[index] = {
+      ...incident,
+      status: incident.status === 'Contained' ? 'Investigating' : incident.status,
+      containment: {
+        ...incident.containment,
+        active: false,
+        releasedBy: actorId,
+        releaseReason: reason,
+        releasedAt: timestamp
+      },
+      updatedAt: timestamp
+    };
+    this.data.events.unshift(event);
+    try {
+      this.saveDatabase();
+    } catch (error) {
+      this.data.incidents[index] = previousIncident;
+      this.data.events = previousEvents;
+      throw error;
+    }
+    return this.data.incidents[index];
   }
 
   public updateIncident(id: string, updates: Partial<SecurityIncident>): SecurityIncident | null {

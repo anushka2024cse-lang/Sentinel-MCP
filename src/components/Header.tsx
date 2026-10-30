@@ -4,16 +4,14 @@ import {
   ShieldCheck,
   Play,
   RotateCcw,
-  UserCheck
+  LogOut
 } from 'lucide-react';
-import { UserRole, IdentityProfile } from '../types/index.js';
+import { UserRole } from '../types/index.js';
 
 interface HeaderProps {
   currentRole: UserRole;
-  onRoleChange: (role: UserRole) => void;
-  identities: IdentityProfile[];
   currentIdentityId: string;
-  onIdentityChange: (id: string) => void;
+  onLogout: () => void;
   onRunPrimaryDemo: () => void;
   onResetDemo: () => void;
   isResetting: boolean;
@@ -21,10 +19,8 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   currentRole,
-  onRoleChange,
-  identities,
   currentIdentityId,
-  onIdentityChange,
+  onLogout,
   onRunPrimaryDemo,
   onResetDemo,
   isResetting
@@ -73,38 +69,20 @@ export const Header: React.FC<HeaderProps> = ({
         </button>
       </div>
 
-      {/* Right Controls: Role & Identity Switcher */}
+      {/* Authenticated principal */}
       <div className="flex items-center gap-4">
-        {/* Active Role Selector */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-400 font-mono hidden lg:inline">Active Role:</span>
-          <select
-            value={currentRole}
-            onChange={(e) => onRoleChange(e.target.value as UserRole)}
-            className="text-xs font-medium bg-[#111C30] border border-slate-700 text-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-blue-500 cursor-pointer"
-          >
-            <option value="Administrator">Administrator (SARAH)</option>
-            <option value="Security Analyst">Security Analyst (MARCUS)</option>
-            <option value="Approver">Approver (ELENA)</option>
-            <option value="Read-only Auditor">Read-only Auditor (AUDIT-BOT)</option>
-          </select>
+        <div className="hidden sm:block text-right">
+          <div className="text-xs font-medium text-slate-200">{currentRole}</div>
+          <div className="text-[10px] font-mono text-slate-500">{currentIdentityId}</div>
         </div>
-
-        {/* Identity Context */}
-        <div className="hidden xl:flex items-center gap-2 border-l border-slate-800 pl-3">
-          <UserCheck className="w-4 h-4 text-cyan-400" />
-          <select
-            value={currentIdentityId}
-            onChange={(e) => onIdentityChange(e.target.value)}
-            className="text-xs font-mono bg-transparent border-none text-slate-300 focus:outline-none cursor-pointer max-w-[150px] truncate"
-          >
-            {identities.map(i => (
-              <option key={i.id} value={i.id} className="bg-[#111C30] text-slate-200">
-                {i.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        <button
+          onClick={onLogout}
+          className="flex items-center gap-1.5 rounded-lg border border-slate-800 px-2.5 py-1.5 text-xs text-slate-400 hover:bg-slate-800/80 hover:text-slate-200"
+          title="Sign out of this browser session"
+        >
+          <LogOut className="h-3.5 w-3.5" />
+          <span>Sign out</span>
+        </button>
       </div>
     </header>
   );

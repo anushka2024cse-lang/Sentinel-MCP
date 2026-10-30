@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AlertTriangle,
   ShieldCheck,
@@ -9,7 +9,7 @@ import {
   Send,
   FileText
 } from 'lucide-react';
-import { SecurityIncident, IncidentStatus, UserRole } from '../types/index.js';
+import { SecurityIncident, UserRole } from '../types/index.js';
 import { api } from '../services/api.js';
 
 interface SecurityIncidentsProps {
@@ -28,6 +28,38 @@ export const SecurityIncidents: React.FC<SecurityIncidentsProps> = ({
   const [selectedIncident, setSelectedIncident] = useState<SecurityIncident | null>(incidents[0] || null);
   const [newNote, setNewNote] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
+  const [detail, setDetail] = useState<Awaited<ReturnType<typeof api.getIncidentDetails>> | null>(null);
+  const [isLoadingDetail, setIsLoadingDetail] = useState(false);
+  const [isMutating, setIsMutating] = useState(false);
+  const canInvestigate = currentRole === 'Administrator' || currentRole === 'Security Analyst';
+  const canContainOrResolve = currentRole === 'Administrator';
+
+  useEffect(() => {
+    if (!selectedIncident) return;
+    const refreshedIncident = incidents.find(incident => incident.id === selectedIncident.id);
+    if (refreshedIncident && refreshedIncident.updatedAt !== selectedIncident.updatedAt) {
+      setSelectedIncident(refreshedIncident);
+    }
+  }, [incidents, selectedIncident]);
+
+  useEffect(() => {
+    if (!selectedIncident) {
+      setDetail(null);
+      return;
+    }
+    let active = true;
+    setIsLoadingDetail(true);
+    api.getIncidentDetails(selectedIncident.id)
+      .then(result => { if (active) setDetail(result); })
+      .catch(error => {
+        if (active) {
+          setDetail(null);
+          alert(`Failed to load incident evidence: ${error.message}`);
+        }
+      })
+      .finally(() => { if (active) setIsLoadingDetail(false); });
+    return () => { active = false; };
+  }, [selectedIncident?.id, selectedIncident?.updatedAt]);
 
   const filtered = incidents.filter(i => {
     if (statusFilter !== 'ALL' && i.status !== statusFilter) return false;
@@ -36,32 +68,53 @@ export const SecurityIncidents: React.FC<SecurityIncidentsProps> = ({
 
   const handleAddNote = async () => {
     if (!selectedIncident || !newNote.trim()) return;
+    setIsMutating(true);
     try {
-      await api.updateIncident(selectedIncident.id, {
-        note: newNote,
-        author: currentRole === 'Administrator' ? 'Sarah Connor (Admin)' : 'Marcus Vance (Analyst)'
-      });
+      await api.updateIncident(selectedIncident.id, { note: newNote.trim() });
       setNewNote('');
       onRefresh();
-      // update local selection
-      const updated = incidents.find(i => i.id === selectedIncident.id);
-      if (updated) setSelectedIncident(updated);
     } catch (e: any) {
       alert(`Error updating notes: ${e.message}`);
+    } finally {
+      setIsMutating(false);
     }
   };
 
-  const handleUpdateStatus = async (status: IncidentStatus) => {
-    if (!selectedIncident) return;
+  const runIncidentAction = async (
+    action: 'investigate' | 'contain' | 'resolve' | 'release',
+    value: string
+  ) => {
+    if (!selectedIncident || !value.trim()) return;
+    setIsMutating(true);
     try {
-      await api.updateIncident(selectedIncident.id, {
-        status,
-        note: `Status updated to ${status}`
-      });
+      if (action === 'investigate') await api.investigateIncident(selectedIncident.id, value.trim());
+      if (action === 'contain') await api.containIncident(selectedIncident.id, value.trim());
+      if (action === 'resolve') await api.resolveIncident(selectedIncident.id, value.trim());
+      if (action === 'release') await api.releaseIncidentContainment(selectedIncident.id, value.trim());
       onRefresh();
     } catch (e: any) {
-      alert(`Error updating status: ${e.message}`);
+      alert(`Incident action failed: ${e.message}`);
+    } finally {
+      setIsMutating(false);
     }
+  };
+
+  const requestIncidentAction = (action: 'investigate' | 'contain' | 'resolve' | 'release') => {
+    if (!selectedIncident || isMutating) return;
+    if (action === 'investigate') {
+      const note = window.prompt('Record the initial investigation note:');
+      if (note?.trim()) void runIncidentAction(action, note);
+      return;
+    }
+    const prompts = {
+      contain: 'Quarantine the affected MCP server? All its protected tool calls will be blocked until explicit recovery.',
+      resolve: 'Provide resolution evidence (at least 10 characters):',
+      release: 'Release the incident enforcement lock? The server remains quarantined until it is separately re-approved.'
+    };
+    const value = action === 'contain'
+      ? window.confirm(prompts.contain) ? window.prompt('Reason for containment:') : null
+      : window.prompt(prompts[action]);
+    if (value?.trim()) void runIncidentAction(action, value);
   };
 
   return (
@@ -98,10 +151,11 @@ export const SecurityIncidents: React.FC<SecurityIncidentsProps> = ({
           {filtered.map((inc) => {
             const isSelected = selectedIncident?.id === inc.id;
             return (
-              <div
+              <button
                 key={inc.id}
+                type="button"
                 onClick={() => setSelectedIncident(inc)}
-                className={`p-4 rounded-xl border cursor-pointer transition-all ${
+                className={`w-full text-left p-4 rounded-xl border cursor-pointer transition-all ${
                   isSelected
                     ? 'bg-[#152033] border-blue-500/80 shadow-lg shadow-blue-950/40'
                     : 'bg-[#0F172A] border-slate-800 hover:border-slate-700'
@@ -136,7 +190,7 @@ export const SecurityIncidents: React.FC<SecurityIncidentsProps> = ({
                   </span>
                   <span>{new Date(inc.createdAt).toLocaleTimeString()}</span>
                 </div>
-              </div>
+              </button>
             );
           })}
 
@@ -168,26 +222,32 @@ export const SecurityIncidents: React.FC<SecurityIncidentsProps> = ({
                   <h2 className="text-base font-bold text-slate-100">{selectedIncident.title}</h2>
                 </div>
 
-                {/* Workflow status transition buttons */}
+                {/* Lifecycle actions perform server-side transitions; status is never changed by the UI alone. */}
                 <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={() => handleUpdateStatus('Investigating')}
-                    className="px-2.5 py-1 text-[11px] font-semibold rounded bg-blue-950 text-blue-300 border border-blue-800 hover:bg-blue-900 cursor-pointer"
-                  >
-                    Investigate
-                  </button>
-                  <button
-                    onClick={() => handleUpdateStatus('Contained')}
-                    className="px-2.5 py-1 text-[11px] font-semibold rounded bg-amber-950 text-amber-300 border border-amber-800 hover:bg-amber-900 cursor-pointer"
-                  >
-                    Contain
-                  </button>
-                  <button
-                    onClick={() => handleUpdateStatus('Resolved')}
-                    className="px-2.5 py-1 text-[11px] font-semibold rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900 cursor-pointer"
-                  >
-                    Resolve
-                  </button>
+                  {selectedIncident.status === 'Open' && canInvestigate && (
+                    <button disabled={isMutating} onClick={() => requestIncidentAction('investigate')}
+                      className="px-2.5 py-1 text-[11px] font-semibold rounded bg-blue-950 text-blue-300 border border-blue-800 hover:bg-blue-900 disabled:opacity-50">
+                      Investigate
+                    </button>
+                  )}
+                  {['Open', 'Investigating'].includes(selectedIncident.status) && canContainOrResolve && (
+                    <button disabled={isMutating} onClick={() => requestIncidentAction('contain')}
+                      className="px-2.5 py-1 text-[11px] font-semibold rounded bg-amber-950 text-amber-300 border border-amber-800 hover:bg-amber-900 disabled:opacity-50">
+                      Quarantine affected server
+                    </button>
+                  )}
+                  {['Open', 'Investigating', 'Contained'].includes(selectedIncident.status) && canContainOrResolve && (
+                    <button disabled={isMutating} onClick={() => requestIncidentAction('resolve')}
+                      className="px-2.5 py-1 text-[11px] font-semibold rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900 disabled:opacity-50">
+                      Resolve with evidence
+                    </button>
+                  )}
+                  {selectedIncident.containment?.active && canContainOrResolve && (
+                    <button disabled={isMutating} onClick={() => requestIncidentAction('release')}
+                      className="px-2.5 py-1 text-[11px] font-semibold rounded bg-slate-800 text-slate-200 border border-slate-600 hover:bg-slate-700 disabled:opacity-50">
+                      Release containment lock
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -215,6 +275,69 @@ export const SecurityIncidents: React.FC<SecurityIncidentsProps> = ({
                   <div>
                     <span>Assigned Analyst:</span> <span className="text-slate-200">{selectedIncident.assignedTo || 'Unassigned'}</span>
                   </div>
+                  {selectedIncident.containment && (
+                    <div className={`p-3 rounded-lg border text-xs ${
+                      selectedIncident.containment.active
+                        ? 'bg-red-950/30 border-red-900/60 text-red-200'
+                        : 'bg-slate-900 border-slate-800 text-slate-300'
+                    }`}>
+                      <strong>{selectedIncident.containment.active ? 'ENFORCEMENT ACTIVE' : 'Containment released'}</strong>
+                      <p className="mt-1">{selectedIncident.containment.reason}</p>
+                      {selectedIncident.containment.releasedAt && (
+                        <p className="mt-1 text-slate-400">
+                          Released by {selectedIncident.containment.releasedBy} at {new Date(selectedIncident.containment.releasedAt).toLocaleString()}.
+                          Server trust is not automatically restored.
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  {selectedIncident.resolutionDetails && (
+                    <div className="p-3 rounded-lg bg-emerald-950/20 border border-emerald-900/40 text-xs text-emerald-200">
+                      <strong>Resolution evidence</strong>
+                      <p className="mt-1">{selectedIncident.resolutionDetails}</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-3 pt-3 border-t border-slate-800">
+                  <h3 className="text-xs font-bold text-slate-200 flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-blue-400" /> Correlated evidence
+                  </h3>
+                  {isLoadingDetail && <p className="text-xs text-slate-500">Loading incident evidence…</p>}
+                  {detail && (
+                    <>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
+                        <div className="p-2 rounded bg-black/30 border border-slate-800 text-slate-300">
+                          Related requests: {detail.requests.length}
+                        </div>
+                        <div className="p-2 rounded bg-black/30 border border-slate-800 text-slate-300">
+                          Matched policies: {detail.policies.map(policy => policy.name).join(', ') || 'None recorded'}
+                        </div>
+                      </div>
+                      <div className="max-h-44 overflow-y-auto space-y-2">
+                        {detail.events.map(event => (
+                          <div key={event.id} className="p-2 rounded bg-black/30 border border-slate-800 text-[11px]">
+                            <div className="flex justify-between gap-2 text-slate-400">
+                              <span>{event.eventType} · {event.decision}</span>
+                              <span>{new Date(event.createdAt).toLocaleString()}</span>
+                            </div>
+                            <p className="mt-1 text-slate-300">{event.evidenceSummary}</p>
+                          </div>
+                        ))}
+                        {detail.events.length === 0 && <p className="text-xs text-slate-500">No correlated audit events found.</p>}
+                      </div>
+                      {detail.requests.length > 0 && (
+                        <div className="space-y-1">
+                          {detail.requests.map(request => (
+                            <div key={request.id} className="text-[11px] text-slate-400">
+                              {request.requestId} · {request.actorId} · {request.toolName} · {request.decision} · risk {request.riskScore}
+                              {request.remediationReason && <span> · {request.remediationReason}</span>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -244,11 +367,12 @@ export const SecurityIncidents: React.FC<SecurityIncidentsProps> = ({
                     onChange={(e) => setNewNote(e.target.value)}
                     placeholder="Add an investigation note or action taken..."
                     className="flex-1 bg-[#111C30] border border-slate-700 rounded-lg p-2 text-xs text-slate-200 focus:outline-none focus:border-blue-500"
-                    onKeyDown={(e) => { if (e.key === 'Enter') handleAddNote(); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void handleAddNote(); }}
                   />
                   <button
                     onClick={handleAddNote}
-                    className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                    disabled={isMutating || selectedIncident.status === 'Resolved' || selectedIncident.status === 'False Positive' || !canInvestigate}
+                    className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1 cursor-pointer disabled:opacity-50"
                   >
                     <Send className="w-3.5 h-3.5" />
                     <span>Add</span>

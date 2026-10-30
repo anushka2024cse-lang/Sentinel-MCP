@@ -8,7 +8,7 @@ export type ApprovalStatus = 'approved' | 'pending' | 'unapproved' | 'rejected';
 export type ToolCapability = 'Read' | 'Write' | 'Export' | 'Destructive' | 'Administrative';
 export type RiskCategory = 'Low' | 'Medium' | 'High' | 'Critical';
 export type GatewayDecision = 'ALLOW' | 'DENY' | 'REQUIRE_APPROVAL' | 'SANITIZE_AND_ALLOW';
-export type ExecutionStatus = 'executed' | 'blocked' | 'pending_approval' | 'failed' | 'sanitized';
+export type ExecutionStatus = 'executed' | 'blocked' | 'pending_approval' | 'expired' | 'failed' | 'uncertain' | 'sanitized';
 
 export type IncidentStatus = 'Open' | 'Investigating' | 'Contained' | 'Resolved' | 'False Positive';
 export type IncidentSeverity = 'Low' | 'Medium' | 'High' | 'Critical';
@@ -113,7 +113,7 @@ export interface SecurityEvent {
   id: string;
   eventId: string;
   requestId: string;
-  eventType: 'REQUEST_EVALUATED' | 'TOOL_INVOCATION_DENIED' | 'UNAUTHENTICATED_ACCESS' | 'DATA_LEAK_PREVENTED' | 'PROMPT_INJECTION_DETECTED' | 'TOOL_DEFINITION_CHANGED' | 'RATE_LIMIT_TRIGGERED' | 'SCHEMA_VIOLATION' | 'APPROVAL_DISPATCHED' | 'DIRECT_BYPASS_ATTEMPT';
+  eventType: 'REQUEST_EVALUATED' | 'TOOL_INVOCATION_DENIED' | 'UNAUTHENTICATED_ACCESS' | 'DATA_LEAK_PREVENTED' | 'PROMPT_INJECTION_DETECTED' | 'TOOL_DEFINITION_CHANGED' | 'RATE_LIMIT_TRIGGERED' | 'SCHEMA_VIOLATION' | 'APPROVAL_DISPATCHED' | 'DIRECT_BYPASS_ATTEMPT' | 'INCIDENT_ACTION';
   severity: RiskCategory;
   actorId: string;
   serverId: string;
@@ -145,6 +145,16 @@ export interface ApprovalRequest {
   toolName: string;
   operation: ToolCapability;
   parametersRedacted: Record<string, unknown>;
+  encryptedArguments?: {
+    iv: string;
+    authTag: string;
+    ciphertext: string;
+  };
+  toolId?: string;
+  toolFingerprint?: string;
+  policyVersions?: Record<string, string>;
+  executionStatus?: 'pending_approval' | 'executing' | 'executed' | 'sanitized' | 'expired' | 'failed' | 'blocked' | 'uncertain';
+  executionOutcome?: string;
   destination?: string;
   riskFactors: string[];
   riskScore: number;
@@ -174,6 +184,17 @@ export interface SecurityIncident {
     timestamp: string;
     note: string;
   }[];
+  containment?: {
+    type: 'server_quarantine';
+    active: boolean;
+    initiatedBy: string;
+    reason: string;
+    startedAt: string;
+    releasedBy?: string;
+    releaseReason?: string;
+    releasedAt?: string;
+  };
+  resolutionDetails?: string;
   createdAt: string;
   updatedAt: string;
   resolvedAt?: string;

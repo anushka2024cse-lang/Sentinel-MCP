@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import Ajv from 'ajv';
 import {
   GatewayDecision,
   ExecutionStatus,
@@ -13,10 +14,24 @@ import {
   MCPServer
 } from '../types/index.js';
 import { storage, computeFingerprint } from './storage.js';
+import { callMcpTool, computeMcpToolFingerprint } from './mcpClient.js';
 import { detectPromptInjection } from '../utils/detection.js';
+import {
+  canonicalJson,
+  decryptApprovalArguments,
+  encryptApprovalArguments,
+  fingerprintApprovalOperation
+} from './approvalCrypto.js';
+import { hasPermission } from './auth.js';
+
+const argumentSchemaValidator = new Ajv({ allErrors: true, strict: false });
 
 export interface EvaluationInput {
   requestId?: string;
+  principal?: {
+    subject: string;
+    role: UserRole;
+  };
   actorId?: string;
   actorRole?: UserRole;
   authToken?: string;
@@ -46,6 +61,13 @@ export interface EvaluationResult {
   toolExecuted: boolean;
   dataExfiltrated: boolean;
   executionEvidence: string;
+}
+
+export class ApprovalWorkflowError extends Error {
+  constructor(public readonly status: number, message: string) {
+    super(message);
+    this.name = 'ApprovalWorkflowError';
+  }
 }
 
 // Secret detection patterns (Synthetic and common credential heuristics)
@@ -96,6 +118,11 @@ export class SecurityGatewayEngine {
   public static async evaluateRequest(input: EvaluationInput): Promise<EvaluationResult> {
     const now = new Date();
     const requestId = input.requestId || `req-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+    const actor = input.principal
+      ? { id: input.principal.subject, role: input.principal.role }
+      : input.isTestRun && input.actorId
+        ? storage.getIdentityById(input.actorId)
+        : undefined;
     const riskFactors: string[] = [];
     let riskScore = 10;
     const sensitiveFindings: SensitiveDataFinding[] = [];
@@ -112,7 +139,7 @@ export class SecurityGatewayEngine {
         requestId,
         eventType: 'DIRECT_BYPASS_ATTEMPT',
         severity: 'Critical',
-        actorId: input.actorId || 'unknown_intruder',
+        actorId: actor?.id || 'unknown_intruder',
         serverId: input.serverId,
         toolName: input.toolName,
         decision: 'DENY',
@@ -124,8 +151,8 @@ export class SecurityGatewayEngine {
       const secReq: SecurityRequest = {
         id: `sec-${Date.now()}`,
         requestId,
-        actorId: input.actorId || 'unknown_intruder',
-        actorRole: input.actorRole || 'Read-only Auditor',
+        actorId: actor?.id || 'unknown_intruder',
+        actorRole: actor?.role || 'Read-only Auditor',
         serverId: input.serverId,
         toolName: input.toolName,
         arguments: input.arguments || {},
@@ -157,12 +184,7 @@ export class SecurityGatewayEngine {
     }
 
     // Step 1: Authentication & Identity Check
-    let actor = input.actorId ? storage.getIdentityById(input.actorId) : undefined;
-    if (!actor && input.actorRole) {
-      actor = storage.getIdentities().find(i => i.role === input.actorRole);
-    }
-
-    if (!input.actorId || (!actor && input.actorId !== 'anonymous')) {
+    if (!actor) {
       riskFactors.push('Unauthenticated client: Missing identity profile');
       riskScore += 80;
 
@@ -216,7 +238,7 @@ export class SecurityGatewayEngine {
       };
     }
 
-    const resolvedRole: UserRole = input.actorRole || actor?.role || 'Read-only Auditor';
+    const resolvedRole: UserRole = actor.role;
 
     // Step 2: Server Resolution and Trust Check
     const server: MCPServer | undefined = storage.getServerById(input.serverId);
@@ -232,6 +254,24 @@ export class SecurityGatewayEngine {
         riskScore: 90,
         riskFactors,
         reason: 'Target MCP server is not registered in the system inventory.',
+        eventType: 'TOOL_INVOCATION_DENIED',
+        isTestRun: input.isTestRun
+      });
+    }
+
+    const activeContainment = storage.getActiveIncidentContainment(server.id, input.toolName);
+    if (activeContainment) {
+      riskFactors.push(`Incident ${activeContainment.id} has an active server containment.`);
+      return this.rejectWithEvent({
+        requestId,
+        actorId: actor?.id || 'unknown',
+        actorRole: resolvedRole,
+        serverId: server.id,
+        toolName: input.toolName,
+        operation: 'Read',
+        riskScore: 100,
+        riskFactors,
+        reason: `Execution is blocked by active incident containment ${activeContainment.id}.`,
         eventType: 'TOOL_INVOCATION_DENIED',
         isTestRun: input.isTestRun
       });
@@ -277,6 +317,23 @@ export class SecurityGatewayEngine {
       });
     }
 
+    if (tool.approvalStatus !== 'approved') {
+      riskFactors.push(`Tool '${tool.name}' is not explicitly approved for gateway execution.`);
+      return this.rejectWithEvent({
+        requestId,
+        actorId: actor.id,
+        actorRole: resolvedRole,
+        serverId: server.id,
+        toolName: tool.name,
+        operation: tool.capabilityType,
+        riskScore: 90,
+        riskFactors,
+        reason: 'Tool definition must be explicitly approved by an administrator before execution.',
+        eventType: 'TOOL_INVOCATION_DENIED',
+        isTestRun: input.isTestRun
+      });
+    }
+
     // Check Definition Tampering
     let currentFingerprint = tool.definitionFingerprint;
     if (input.tamperToolSchema) {
@@ -284,11 +341,14 @@ export class SecurityGatewayEngine {
       currentFingerprint = 'tampered_hash_9999';
     }
 
-    const baselineHash = computeFingerprint({
+    const toolDefinition = {
       name: tool.name,
       description: tool.description,
       inputSchema: tool.inputSchema
-    });
+    };
+    const baselineHash = server.connectionMode === 'live_mcp_proxy'
+      ? computeMcpToolFingerprint(toolDefinition)
+      : computeFingerprint(toolDefinition);
 
     if (currentFingerprint !== baselineHash || input.tamperToolSchema) {
       riskFactors.push('CRITICAL: Tool definition fingerprint mismatch detected (Integrity Violation)');
@@ -419,6 +479,27 @@ export class SecurityGatewayEngine {
       };
     }
 
+    const argumentDestination = typeof input.arguments?.destination === 'string'
+      ? input.arguments.destination
+      : undefined;
+    if (input.destination && argumentDestination && input.destination !== argumentDestination) {
+      return this.rejectWithEvent({
+        requestId,
+        actorId: actor?.id || 'unknown',
+        actorRole: resolvedRole,
+        serverId: server.id,
+        toolName: tool.name,
+        operation: tool.capabilityType,
+        riskScore: 90,
+        riskFactors: ['The supplied destination does not match the destination in the tool arguments.'],
+        policyId: 'pol-002',
+        reason: 'Conflicting destinations were provided; the operation was blocked before execution.',
+        eventType: 'TOOL_INVOCATION_DENIED',
+        isTestRun: input.isTestRun
+      });
+    }
+    const effectiveDestination = argumentDestination || input.destination;
+
     // Step 5: Prompt Injection / Tool Poisoning Inspection on Arguments & Context
     const injectionCheck = this.detectPromptInjection(input.arguments);
     if (injectionCheck.detected) {
@@ -507,7 +588,7 @@ export class SecurityGatewayEngine {
 
       // Check Destination Allowlist for exports
       if (tool.capabilityType === 'Export') {
-        const dest = (input.destination || (input.arguments?.destination as string) || '').toLowerCase();
+        const dest = (effectiveDestination || '').toLowerCase();
         if (policy.allowedDestinations && policy.allowedDestinations.length > 0) {
           const isAllowedDest = policy.allowedDestinations.some(d => dest.startsWith(d.toLowerCase()));
           if (!dest || !isAllowedDest) {
@@ -582,25 +663,48 @@ export class SecurityGatewayEngine {
         riskScore = Math.max(riskScore, 65);
 
         // Create Approval Request
-        const approvalReq: ApprovalRequest = {
-          id: `appr-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+        const approvalId = `appr-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`;
+        const destination = effectiveDestination;
+        const policyVersions = Object.fromEntries(
+          policies
+            .filter(candidate => matchedPolicyIds.includes(candidate.id))
+            .map(candidate => [candidate.id, candidate.updatedAt])
+        );
+        const approvalFingerprint = fingerprintApprovalOperation({
           requestId,
-          requesterId: actor?.id || 'unknown',
+          requesterId: actor.id,
+          requesterRole: resolvedRole,
+          serverId: server.id,
+          toolId: tool.id,
+          toolName: tool.name,
+          toolFingerprint: baselineHash,
+          arguments: input.arguments,
+          destination,
+          policyVersions
+        });
+        const approvalReq: ApprovalRequest = {
+          id: approvalId,
+          requestId,
+          requesterId: actor.id,
           requesterRole: resolvedRole,
           serverId: server.id,
           toolName: tool.name,
           operation: tool.capabilityType,
           parametersRedacted: this.redactSensitiveObject(input.arguments),
-          destination: input.destination || (input.arguments?.destination as string) || undefined,
+          encryptedArguments: encryptApprovalArguments(input.arguments),
+          toolId: tool.id,
+          toolFingerprint: baselineHash,
+          policyVersions,
+          executionStatus: 'pending_approval',
+          destination,
           riskFactors,
           riskScore,
           policyReason: policy.description,
-          requestFingerprint: crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex').substring(0, 16),
+          requestFingerprint: approvalFingerprint,
           status: 'PENDING',
           expiresAt: new Date(Date.now() + 3600000).toISOString(), // 1 hour expiry
           createdAt: now.toISOString()
         };
-        storage.addApproval(approvalReq);
 
         const event: SecurityEvent = {
           id: `evt-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
@@ -608,7 +712,7 @@ export class SecurityGatewayEngine {
           requestId,
           eventType: 'APPROVAL_DISPATCHED',
           severity: 'High',
-          actorId: actor?.id || 'unknown',
+          actorId: actor.id,
           serverId: server.id,
           toolName: tool.name,
           decision: 'REQUIRE_APPROVAL',
@@ -616,16 +720,14 @@ export class SecurityGatewayEngine {
           evidenceSummary: `Execution suspended pending approval by compliance team. Approval Ticket: ${approvalReq.id}.`,
           createdAt: now.toISOString()
         };
-        storage.addEvent(event);
-
         const secReq: SecurityRequest = {
           id: `sec-${Date.now()}`,
           requestId,
-          actorId: actor?.id || 'unknown',
+          actorId: actor.id,
           actorRole: resolvedRole,
           serverId: server.id,
           toolName: tool.name,
-          arguments: input.arguments || {},
+          arguments: this.redactSensitiveObject(input.arguments || {}),
           operation: tool.capabilityType,
           decision: 'REQUIRE_APPROVAL',
           riskScore,
@@ -635,7 +737,7 @@ export class SecurityGatewayEngine {
           isTestRun: input.isTestRun,
           createdAt: now.toISOString()
         };
-        storage.addRequest(secReq);
+        storage.createPendingApproval(approvalReq, secReq, event);
 
         return {
           decision: 'REQUIRE_APPROVAL',
@@ -657,7 +759,66 @@ export class SecurityGatewayEngine {
 
 
     // Step 7: Execute Protected MCP Tool (Only reached when fully permitted!)
-    const rawExecutionResult = this.executeToolAdapter(tool, input.arguments);
+    let rawExecutionResult: { data: unknown; evidence: string };
+    try {
+      rawExecutionResult = await this.executeToolAdapter(server, tool, input.arguments);
+    } catch (error) {
+      const executionUncertain = error instanceof Error &&
+        'executionUncertain' in error && error.executionUncertain === true;
+      const executionDispatched = error instanceof Error &&
+        'executionDispatched' in error && error.executionDispatched === true;
+      const outcome = executionUncertain
+        ? 'The live MCP call may have reached the server; its outcome could not be confirmed and will not be retried.'
+        : 'The protected tool adapter rejected or could not complete the request.';
+      riskFactors.push(outcome);
+      const failedAt = new Date().toISOString();
+      const event: SecurityEvent = {
+        id: `evt-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+        eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
+        requestId,
+        eventType: 'REQUEST_EVALUATED',
+        severity: 'High',
+        actorId: actor.id,
+        serverId: server.id,
+        toolName: tool.name,
+        decision: 'DENY',
+        evidenceSummary: outcome,
+        createdAt: failedAt
+      };
+      storage.addEvent(event);
+      storage.addRequest({
+        id: `sec-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+        requestId,
+        actorId: actor.id,
+        actorRole: resolvedRole,
+        serverId: server.id,
+        toolName: tool.name,
+        arguments: this.redactSensitiveObject(input.arguments),
+        operation: tool.capabilityType,
+        destination: effectiveDestination,
+        decision: 'DENY',
+        riskScore: Math.max(riskScore, 70),
+        policyIds: matchedPolicyIds,
+        remediationReason: outcome,
+        executionStatus: executionUncertain ? 'uncertain' : 'failed',
+        isTestRun: input.isTestRun,
+        createdAt: failedAt
+      });
+      return {
+        decision: 'DENY',
+        executionStatus: executionUncertain ? 'uncertain' : 'failed',
+        riskScore: Math.max(riskScore, 70),
+        riskCategory: 'High',
+        riskFactors,
+        matchedPolicyIds,
+        remediationReason: outcome,
+        sensitiveFindings,
+        auditEventId: event.eventId,
+        toolExecuted: executionDispatched,
+        dataExfiltrated: false,
+        executionEvidence: outcome
+      };
+    }
     toolExecuted = true;
     executionEvidence = rawExecutionResult.evidence;
 
@@ -728,10 +889,311 @@ export class SecurityGatewayEngine {
     };
   }
 
+  public static async approveAndExecute(
+    approvalId: string,
+    reviewer: { subject: string; role: UserRole },
+    reason: string | undefined,
+    requesterCredentialIsActive: boolean
+  ): Promise<ApprovalRequest> {
+    const approval = storage.getApprovalById(approvalId);
+    if (!approval) throw new ApprovalWorkflowError(404, 'Approval request not found.');
+    if (approval.status !== 'PENDING') {
+      throw new ApprovalWorkflowError(409, `Approval is already ${approval.status.toLowerCase()}.`);
+    }
+
+    const now = new Date();
+    const event = (decision: GatewayDecision, evidenceSummary: string): SecurityEvent => ({
+      id: `evt-${now.getTime()}-${crypto.randomBytes(4).toString('hex')}`,
+      eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
+      requestId: approval.requestId,
+      eventType: 'REQUEST_EVALUATED',
+      severity: decision === 'DENY' ? 'High' : 'Low',
+      actorId: reviewer.subject,
+      serverId: approval.serverId,
+      toolName: approval.toolName,
+      decision,
+      evidenceSummary,
+      createdAt: now.toISOString()
+    });
+
+    const expire = () => {
+      const expired = storage.transitionApproval(
+        approval.id,
+        'PENDING',
+        {
+          status: 'EXPIRED',
+          executionStatus: 'expired',
+          executionOutcome: 'Approval expired before execution.'
+        },
+        event('DENY', `Approval ${approval.id} expired before execution.`),
+        {
+          decision: 'DENY',
+          executionStatus: 'blocked',
+          remediationReason: 'Approval expired before execution.'
+        }
+      );
+      if (!expired) throw new ApprovalWorkflowError(409, 'Approval state changed before it could expire.');
+      throw new ApprovalWorkflowError(409, 'Approval has expired and cannot be executed.');
+    };
+
+    if (Date.parse(approval.expiresAt) <= now.getTime()) expire();
+    if (reviewer.subject === approval.requesterId) {
+      throw new ApprovalWorkflowError(403, 'A requester cannot approve their own operation.');
+    }
+    if (!requesterCredentialIsActive) {
+      throw new ApprovalWorkflowError(409, 'The requester credential is no longer active.');
+    }
+    if (
+      !approval.encryptedArguments ||
+      !approval.toolId ||
+      !approval.toolFingerprint ||
+      !approval.policyVersions ||
+      !storage.getRequestByRequestId(approval.requestId)
+    ) {
+      throw new ApprovalWorkflowError(409, 'Approval is missing its original request binding and cannot be executed.');
+    }
+
+    let args: Record<string, unknown>;
+    try {
+      args = decryptApprovalArguments(approval.encryptedArguments);
+    } catch {
+      throw new ApprovalWorkflowError(409, 'The protected request payload cannot be verified; execution was not attempted.');
+    }
+
+    const request = storage.getRequestByRequestId(approval.requestId);
+    if (
+      !request ||
+      request.decision !== 'REQUIRE_APPROVAL' ||
+      request.executionStatus !== 'pending_approval' ||
+      request.actorId !== approval.requesterId ||
+      request.actorRole !== approval.requesterRole ||
+      request.serverId !== approval.serverId ||
+      request.toolName !== approval.toolName
+    ) {
+      throw new ApprovalWorkflowError(409, 'The original gateway request is no longer pending or does not match this approval.');
+    }
+    if (!hasPermission(approval.requesterRole, 'gateway.execute')) {
+      throw new ApprovalWorkflowError(403, 'The requester no longer has permission to execute this operation.');
+    }
+
+    const server = storage.getServerById(approval.serverId);
+    const tool = storage.getToolById(approval.toolId);
+    if (
+      !server ||
+      server.trustStatus !== 'trusted' ||
+      server.approvalStatus !== 'approved' ||
+      !tool ||
+      tool.serverId !== approval.serverId ||
+      tool.name !== approval.toolName ||
+      tool.approvalStatus !== 'approved'
+    ) {
+      throw new ApprovalWorkflowError(409, 'The approved server or tool is unavailable, untrusted, or no longer approved.');
+    }
+
+    const toolDefinition = {
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema
+    };
+    const toolFingerprint = server.connectionMode === 'live_mcp_proxy'
+      ? computeMcpToolFingerprint(toolDefinition)
+      : computeFingerprint(toolDefinition);
+    if (toolFingerprint !== approval.toolFingerprint || tool.definitionFingerprint !== approval.toolFingerprint) {
+      throw new ApprovalWorkflowError(409, 'The tool definition changed after approval; execution was not attempted.');
+    }
+
+    const validation = this.validateArguments(args, tool.inputSchema);
+    if (!validation.valid) {
+      throw new ApprovalWorkflowError(409, `The approved arguments no longer validate: ${validation.error}`);
+    }
+
+    const fingerprint = fingerprintApprovalOperation({
+      requestId: approval.requestId,
+      requesterId: approval.requesterId,
+      requesterRole: approval.requesterRole,
+      serverId: approval.serverId,
+      toolId: tool.id,
+      toolName: tool.name,
+      toolFingerprint,
+      arguments: args,
+      destination: approval.destination,
+      policyVersions: approval.policyVersions
+    });
+    const storedFingerprint = Buffer.from(approval.requestFingerprint, 'hex');
+    const actualFingerprint = Buffer.from(fingerprint, 'hex');
+    if (
+      storedFingerprint.length !== actualFingerprint.length ||
+      !crypto.timingSafeEqual(storedFingerprint, actualFingerprint)
+    ) {
+      throw new ApprovalWorkflowError(409, 'The original operation fingerprint does not match; execution was not attempted.');
+    }
+
+    const policies = storage.getPolicies().filter(policy => policy.enabled);
+    for (const [policyId, version] of Object.entries(approval.policyVersions)) {
+      const policy = policies.find(candidate => candidate.id === policyId);
+      if (!policy || policy.updatedAt !== version) {
+        throw new ApprovalWorkflowError(409, 'A policy used to approve this operation has changed or been disabled.');
+      }
+    }
+
+    for (const policy of policies) {
+      if (policy.applicableToolName && policy.applicableToolName !== tool.name) continue;
+      if (policy.applicableServerId && policy.applicableServerId !== server.id) continue;
+      if (policy.operationType && policy.operationType !== tool.capabilityType) continue;
+
+      if (
+        policy.denyConditions?.disallowReadOnlyWrites &&
+        tool.capabilityType === 'Write' &&
+        approval.requesterRole === 'Read-only Auditor'
+      ) {
+        throw new ApprovalWorkflowError(403, 'A current security policy denies this write operation.');
+      }
+      if (tool.capabilityType === 'Export') {
+        const destination = (approval.destination || '').toLowerCase();
+        if (
+          policy.allowedDestinations?.length &&
+          (!destination || !policy.allowedDestinations.some(allowed => destination.startsWith(allowed.toLowerCase())))
+        ) {
+          throw new ApprovalWorkflowError(403, 'A current security policy denies this export destination.');
+        }
+        if (policy.disallowedDestinations?.some(blocked => destination.startsWith(blocked.toLowerCase()))) {
+          throw new ApprovalWorkflowError(403, 'A current security policy denies this export destination.');
+        }
+      }
+    }
+
+    const claimTime = new Date().toISOString();
+    const claimed = storage.transitionApproval(
+      approval.id,
+      'PENDING',
+      {
+        status: 'APPROVED',
+        approverId: reviewer.subject,
+        approverReason: reason?.trim() || 'Approved after request revalidation.',
+        decidedAt: claimTime,
+        executionStatus: 'executing',
+        executionOutcome: 'Approval recorded; the original operation is being executed.'
+      },
+      event('REQUIRE_APPROVAL', `Reviewer ${reviewer.subject} approved and claimed execution for ${approval.id}.`),
+      { executionStatus: 'pending_approval' }
+    );
+    if (!claimed) throw new ApprovalWorkflowError(409, 'Approval was already decided or claimed by another reviewer.');
+
+    try {
+      const rawResult = await this.executeToolAdapter(server, tool, args);
+      const inspected = this.inspectAndSanitizeOutput(rawResult.data, approval.requestId);
+      for (const finding of inspected.findings) storage.addFinding(finding);
+
+      const status = inspected.wasRedacted ? 'sanitized' : 'executed';
+      const decision = inspected.wasRedacted ? 'SANITIZE_AND_ALLOW' : 'ALLOW';
+      const outcome = inspected.wasRedacted
+        ? 'Original operation executed; sensitive output was redacted before delivery.'
+        : 'Original operation executed successfully.';
+      const serializedOutput = typeof inspected.sanitized === 'string'
+        ? inspected.sanitized
+        : JSON.stringify(inspected.sanitized);
+      const completedAt = new Date().toISOString();
+      const completed = storage.transitionApproval(
+        approval.id,
+        'APPROVED',
+        {
+          executionStatus: status,
+          executionOutcome: outcome
+        },
+        event(decision, outcome),
+        {
+          decision,
+          executionStatus: status,
+          sanitizedOutput: inspected.sanitized,
+          outputSummary: serializedOutput.slice(0, 150),
+          remediationReason: undefined,
+          createdAt: completedAt
+        }
+      );
+      if (!completed) throw new Error('Approval execution claim was lost before recording its outcome.');
+      return completed;
+    } catch {
+      const uncertainOutcome = 'Execution outcome is uncertain; the operation will not be retried automatically.';
+      storage.transitionApproval(
+        approval.id,
+        'APPROVED',
+        {
+          executionStatus: 'uncertain',
+          executionOutcome: uncertainOutcome
+        },
+        event('DENY', uncertainOutcome),
+        {
+          executionStatus: 'failed',
+          remediationReason: uncertainOutcome
+        }
+      );
+      throw new ApprovalWorkflowError(500, uncertainOutcome);
+    }
+  }
+
+  public static denyApproval(
+    approvalId: string,
+    reviewer: { subject: string; role: UserRole },
+    reason?: string
+  ): ApprovalRequest {
+    const approval = storage.getApprovalById(approvalId);
+    if (!approval) throw new ApprovalWorkflowError(404, 'Approval request not found.');
+    if (approval.status !== 'PENDING') {
+      throw new ApprovalWorkflowError(409, `Approval is already ${approval.status.toLowerCase()}.`);
+    }
+    if (Date.parse(approval.expiresAt) <= Date.now()) {
+      throw new ApprovalWorkflowError(409, 'Approval has expired and cannot be decided.');
+    }
+    if (reviewer.subject === approval.requesterId) {
+      throw new ApprovalWorkflowError(403, 'A requester cannot decide their own approval.');
+    }
+
+    const now = new Date().toISOString();
+    const denied = storage.transitionApproval(
+      approvalId,
+      'PENDING',
+      {
+        status: 'DENIED',
+        approverId: reviewer.subject,
+        approverReason: reason?.trim() || 'Rejected by an authorized reviewer.',
+        decidedAt: now,
+        executionStatus: 'blocked',
+        executionOutcome: 'Operation rejected; the tool was not executed.'
+      },
+      {
+        id: `evt-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+        eventId: `EVT-${crypto.randomBytes(8).toString('hex')}`,
+        requestId: approval.requestId,
+        eventType: 'REQUEST_EVALUATED',
+        severity: 'Medium',
+        actorId: reviewer.subject,
+        serverId: approval.serverId,
+        toolName: approval.toolName,
+        decision: 'DENY',
+        evidenceSummary: `Reviewer ${reviewer.subject} rejected approval ${approvalId}; the tool was not executed.`,
+        createdAt: now
+      },
+      {
+        decision: 'DENY',
+        executionStatus: 'blocked',
+        remediationReason: 'Operation rejected by an authorized reviewer.'
+      }
+    );
+    if (!denied) throw new ApprovalWorkflowError(409, 'Approval was already decided by another reviewer.');
+    return denied;
+  }
+
   /**
    * Safe execution dispatcher for synthetic MCP tools
    */
-  private static executeToolAdapter(tool: MCPTool, args: Record<string, unknown>): { data: unknown; evidence: string } {
+  private static async executeToolAdapter(
+    server: MCPServer,
+    tool: MCPTool,
+    args: Record<string, unknown>
+  ): Promise<{ data: unknown; evidence: string }> {
+    if (server.connectionMode === 'live_mcp_proxy') {
+      return callMcpTool(server, tool, args);
+    }
     const syn = storage.getSyntheticData();
 
     switch (tool.name) {
@@ -838,34 +1300,19 @@ export class SecurityGatewayEngine {
    * Argument validation against schema
    */
   private static validateArguments(args: Record<string, unknown>, schema: MCPTool['inputSchema']): { valid: boolean; error?: string } {
-    if (!schema || !schema.properties) return { valid: true };
-
-    // Check required fields
-    if (schema.required) {
-      for (const reqField of schema.required) {
-        if (args[reqField] === undefined || args[reqField] === null || args[reqField] === '') {
-          return { valid: false, error: `Missing required parameter: '${reqField}'` };
-        }
-      }
+    try {
+      const validate = argumentSchemaValidator.compile(schema);
+      if (validate(args)) return { valid: true };
+      const error = validate.errors?.[0];
+      return {
+        valid: false,
+        error: error
+          ? `${error.instancePath || '/'} ${error.message || 'does not match the tool schema'}`
+          : 'Arguments do not match the tool schema.'
+      };
+    } catch {
+      return { valid: false, error: 'The trusted tool schema could not be compiled.' };
     }
-
-    // Check type constraints
-    for (const [key, prop] of Object.entries(schema.properties)) {
-      const val = args[key];
-      if (val !== undefined && val !== null) {
-        if (prop.type === 'number' && (typeof val !== 'number' || isNaN(val))) {
-          return { valid: false, error: `Parameter '${key}' must be a number, received ${typeof val}` };
-        }
-        if (prop.type === 'string' && typeof val !== 'string') {
-          return { valid: false, error: `Parameter '${key}' must be a string` };
-        }
-        if (prop.type === 'boolean' && typeof val !== 'boolean') {
-          return { valid: false, error: `Parameter '${key}' must be a boolean` };
-        }
-      }
-    }
-
-    return { valid: true };
   }
 
   /**

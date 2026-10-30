@@ -15,12 +15,14 @@ import { api } from '../services/api.js';
 interface ApprovalCentreProps {
   approvals: ApprovalRequest[];
   currentRole: UserRole;
+  currentIdentityId: string;
   onRefresh: () => void;
 }
 
 export const ApprovalCentre: React.FC<ApprovalCentreProps> = ({
   approvals,
   currentRole,
+  currentIdentityId,
   onRefresh
 }) => {
   const [decidingId, setDecidingId] = useState<string | null>(null);
@@ -33,18 +35,27 @@ export const ApprovalCentre: React.FC<ApprovalCentreProps> = ({
 
   const handleDecision = async (id: string, decision: 'APPROVED' | 'DENIED') => {
     if (!canApprove) {
-      alert('Access Denied: Only users with the Administrator or Approver role can resolve approval tickets.');
+      alert('Access denied: sign in with a server-configured Administrator or Approver credential.');
       return;
     }
+    const ticket = approvals.find(approval => approval.id === id);
+    if (ticket?.requesterId === currentIdentityId) {
+      alert('A requester cannot decide their own approval.');
+      return;
+    }
+    const confirmation = decision === 'APPROVED'
+      ? 'This will approve and execute the exact stored operation after server-side revalidation. Continue?'
+      : 'Reject this operation? It will not be executed.';
+    if (!window.confirm(confirmation)) return;
 
     setDecidingId(id);
     try {
-      await api.decideApproval(id, decision, 'sarah.connor@corp.internal', currentRole);
-      onRefresh();
+      await api.decideApproval(id, decision);
     } catch (err: any) {
       alert(`Approval error: ${err.message}`);
     } finally {
       setDecidingId(null);
+      onRefresh();
     }
   };
 
@@ -58,7 +69,7 @@ export const ApprovalCentre: React.FC<ApprovalCentreProps> = ({
             <span>Human Approval Centre</span>
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            Two-person integrity gate for high-risk operations, destructive actions, and bulk data exports.
+            Approval dispatches the original operation only after server-side revalidation. The current adapter is simulated.
           </p>
         </div>
 
@@ -101,7 +112,7 @@ export const ApprovalCentre: React.FC<ApprovalCentreProps> = ({
           </span>
         ) : (
           <span className="text-amber-400 font-mono font-bold text-[11px] flex items-center gap-1">
-            <AlertTriangle className="w-3.5 h-3.5" /> READ-ONLY (SWITCH ROLE TO APPROVE)
+            <AlertTriangle className="w-3.5 h-3.5" />             READ-ONLY (APPROVER CREDENTIAL REQUIRED)
           </span>
         )}
       </div>
@@ -131,7 +142,10 @@ export const ApprovalCentre: React.FC<ApprovalCentreProps> = ({
 
                   <div className="text-right shrink-0">
                     <span className="text-[11px] font-mono text-slate-400 flex items-center gap-1 sm:justify-end">
-                      <Clock className="w-3.5 h-3.5" /> Expires in 58m
+                      <Clock className="w-3.5 h-3.5" />
+                      {Date.parse(ticket.expiresAt) > Date.now()
+                        ? `Expires ${new Date(ticket.expiresAt).toLocaleString()}`
+                        : 'Expired — refresh to resolve'}
                     </span>
                     <span className="text-[11px] font-mono text-slate-500">
                       Req ID: {ticket.requestId}
@@ -178,17 +192,17 @@ export const ApprovalCentre: React.FC<ApprovalCentreProps> = ({
                   <div className="flex items-center gap-3">
                     <button
                       onClick={() => handleDecision(ticket.id, 'DENIED')}
-                      disabled={decidingId === ticket.id || !canApprove}
+                      disabled={decidingId === ticket.id || !canApprove || ticket.requesterId === currentIdentityId}
                       className="px-4 py-1.5 rounded-lg bg-red-950/40 text-red-300 border border-red-800 hover:bg-red-900/40 text-xs font-semibold cursor-pointer disabled:opacity-50"
                     >
                       Reject Operation
                     </button>
                     <button
                       onClick={() => handleDecision(ticket.id, 'APPROVED')}
-                      disabled={decidingId === ticket.id || !canApprove}
+                      disabled={decidingId === ticket.id || !canApprove || ticket.requesterId === currentIdentityId}
                       className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-emerald-900/30 disabled:opacity-50"
                     >
-                      Authorize Execution
+                      Approve & Execute
                     </button>
                   </div>
                 </div>
@@ -217,9 +231,15 @@ export const ApprovalCentre: React.FC<ApprovalCentreProps> = ({
                     }`}>
                       {ticket.status}
                     </span>
+                    {ticket.executionStatus && (
+                      <span className="text-slate-400">Execution: {ticket.executionStatus}</span>
+                    )}
                     <span className="text-slate-400">Tool: {ticket.toolName}</span>
                   </div>
                   <p className="text-slate-400 text-[11px]">Decided by {ticket.approverId || 'Approver'} · Reason: {ticket.approverReason || 'Policy verification'}</p>
+                  {ticket.executionOutcome && (
+                    <p className="text-slate-300 text-[11px]">{ticket.executionOutcome}</p>
+                  )}
                 </div>
                 <span className="text-slate-500 text-[11px] shrink-0">
                   {ticket.decidedAt ? new Date(ticket.decidedAt).toLocaleString() : 'N/A'}

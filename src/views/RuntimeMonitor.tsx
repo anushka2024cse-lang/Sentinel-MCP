@@ -12,13 +12,12 @@ import {
   Flame,
   Radio
 } from 'lucide-react';
-import { MCPTool, MCPServer, UserRole, IdentityProfile, SecurityRequest } from '../types/index.js';
+import { MCPTool, MCPServer, UserRole, SecurityRequest } from '../types/index.js';
 import { api } from '../services/api.js';
 
 interface RuntimeMonitorProps {
   servers: MCPServer[];
   tools: MCPTool[];
-  identities: IdentityProfile[];
   currentRole: UserRole;
   recentRequests: SecurityRequest[];
   onRefresh: () => void;
@@ -27,14 +26,12 @@ interface RuntimeMonitorProps {
 export const RuntimeMonitor: React.FC<RuntimeMonitorProps> = ({
   servers,
   tools,
-  identities,
   currentRole,
   recentRequests,
   onRefresh
 }) => {
   const [selectedServerId, setSelectedServerId] = useState<string>(servers[0]?.id || 'srv-demo-enterprise');
   const [selectedToolName, setSelectedToolName] = useState<string>('get_shipment_status');
-  const [selectedActorId, setSelectedActorId] = useState<string>(identities[0]?.id || 'user-admin');
   const [argsJson, setArgsJson] = useState<string>('{\n  "trackingNumber": "TRK-99214"\n}');
   const [destination, setDestination] = useState<string>('');
   const [bypassGateway, setBypassGateway] = useState<boolean>(false);
@@ -42,6 +39,7 @@ export const RuntimeMonitor: React.FC<RuntimeMonitorProps> = ({
   const [evalResult, setEvalResult] = useState<any | null>(null);
 
   const availableTools = tools.filter(t => t.serverId === selectedServerId);
+  const selectedServer = servers.find(server => server.id === selectedServerId);
 
   const handleToolChange = (toolName: string) => {
     setSelectedToolName(toolName);
@@ -82,10 +80,7 @@ export const RuntimeMonitor: React.FC<RuntimeMonitorProps> = ({
     }
 
     try {
-      const actor = identities.find(i => i.id === selectedActorId);
       const res = await api.evaluateGateway({
-        actorId: selectedActorId,
-        actorRole: actor?.role || currentRole,
         serverId: selectedServerId,
         toolName: selectedToolName,
         arguments: parsedArgs,
@@ -107,10 +102,10 @@ export const RuntimeMonitor: React.FC<RuntimeMonitorProps> = ({
       <div>
         <h1 className="text-xl font-bold text-slate-100 flex items-center gap-2">
           <Activity className="w-5 h-5 text-emerald-400" />
-          <span>Runtime Security Gateway &amp; Live Monitor</span>
+          <span>Runtime Security Gateway</span>
         </h1>
         <p className="text-xs text-slate-400 mt-1">
-          Interactive evaluation playground. Send arbitrary MCP tool calls to test runtime inspection, policy resolution, DLP redaction, and risk scoring.
+          Requests are evaluated by the backend before execution. Live MCP servers are contacted only through the configured Streamable HTTP proxy.
         </p>
       </div>
 
@@ -120,28 +115,20 @@ export const RuntimeMonitor: React.FC<RuntimeMonitorProps> = ({
           <div className="flex items-center justify-between border-b border-slate-800/80 pb-3">
             <h2 className="text-sm font-bold text-slate-100 flex items-center gap-2">
               <Code2 className="w-4 h-4 text-cyan-400" />
-              <span>Simulated Client Request Payload</span>
+              <span>Gateway Tool Request</span>
             </h2>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-950 text-blue-400 border border-blue-800">
-              INTERCEPTOR ACTIVE
+            <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+              selectedServer?.connectionMode === 'live_mcp_proxy'
+                ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                : 'bg-amber-950 text-amber-300 border-amber-800'
+            }`}>
+              {selectedServer?.connectionMode === 'live_mcp_proxy' ? 'LIVE MCP PROXY' : 'SIMULATION ADAPTER'}
             </span>
           </div>
 
           <div className="space-y-3 text-xs">
-            {/* Requester Identity */}
-            <div>
-              <label className="block text-slate-300 font-medium mb-1">Requester Identity Profile</label>
-              <select
-                value={selectedActorId}
-                onChange={(e) => setSelectedActorId(e.target.value)}
-                className="w-full bg-[#111C30] border border-slate-700 rounded-lg p-2 text-slate-200 focus:outline-none focus:border-blue-500 cursor-pointer"
-              >
-                {identities.map((id) => (
-                  <option key={id.id} value={id.id}>
-                    {id.name} — {id.role}
-                  </option>
-                ))}
-              </select>
+            <div className="rounded-lg border border-slate-800 bg-black/20 px-3 py-2 text-slate-400">
+              Authenticated caller role: <strong className="text-slate-200">{currentRole}</strong>
             </div>
 
             {/* Server & Tool Pickers */}
@@ -359,7 +346,7 @@ export const RuntimeMonitor: React.FC<RuntimeMonitorProps> = ({
               </div>
               <h3 className="text-sm font-bold text-slate-200">Gateway Interceptor Ready</h3>
               <p className="text-xs text-slate-400 max-w-sm">
-                Select an identity, pick a tool, adjust payload parameters, and click &ldquo;Submit Request to Gateway&rdquo; to observe real-time security mediation.
+                Choose a tool and adjust its arguments. The gateway resolves your identity and role from your authenticated session.
               </p>
             </div>
           )}
