@@ -2,8 +2,6 @@ import React from 'react';
 import {
   ShieldAlert,
   ShieldCheck,
-  Play,
-  RotateCcw,
   LogOut
 } from 'lucide-react';
 import { UserRole } from '../types/index.js';
@@ -12,18 +10,12 @@ interface HeaderProps {
   currentRole: UserRole;
   currentIdentityId: string;
   onLogout: () => void;
-  onRunPrimaryDemo: () => void;
-  onResetDemo: () => void;
-  isResetting: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   currentRole,
   currentIdentityId,
-  onLogout,
-  onRunPrimaryDemo,
-  onResetDemo,
-  isResetting
+  onLogout
 }) => {
   return (
     <header className="h-16 border-b border-slate-800 bg-[#0B1120] px-6 flex items-center justify-between select-none z-20">
@@ -45,28 +37,6 @@ export const Header: React.FC<HeaderProps> = ({
             </p>
           </div>
         </div>
-      </div>
-
-      {/* Center / Action Bar: Primary Demo Walkthrough */}
-      <div className="flex items-center gap-3">
-        <button
-          onClick={onRunPrimaryDemo}
-          className="flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-500 hover:to-cyan-500 text-white shadow-md shadow-blue-900/30 transition-all cursor-pointer"
-          title="Run required Section 33 end-to-end verification walkthrough"
-        >
-          <Play className="w-3.5 h-3.5 fill-current" />
-          <span>Section 33 Demo Walkthrough</span>
-        </button>
-
-        <button
-          onClick={onResetDemo}
-          disabled={isResetting}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-slate-400 hover:text-slate-200 hover:bg-slate-800/80 rounded-lg border border-slate-800 transition-colors cursor-pointer"
-          title="Reset synthetic enterprise records to pristine baseline"
-        >
-          <RotateCcw className={`w-3.5 h-3.5 ${isResetting ? 'animate-spin' : ''}`} />
-          <span className="hidden md:inline">Reset Sandbox</span>
-        </button>
       </div>
 
       {/* Authenticated principal */}

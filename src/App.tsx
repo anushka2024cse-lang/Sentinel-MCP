@@ -142,9 +142,6 @@ function DashboardApp({ session, onLogout }: { session: ApiSession; onLogout: ()
         currentRole={currentRole}
         currentIdentityId={currentIdentityId}
         onLogout={onLogout}
-        onRunPrimaryDemo={() => setIsDemoModalOpen(true)}
-        onResetDemo={handleResetSandbox}
-        isResetting={isResetting}
       />
 
       {/* Main Layout Body */}
